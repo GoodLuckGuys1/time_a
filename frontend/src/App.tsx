@@ -6,6 +6,7 @@ import {
   testOrgId,
   type ConfigStatus,
 } from "./api";
+import { LoadingOverlay, LoadingPanel, LoadingSpinner } from "./LoadingSpinner";
 import { TempoTimesheet } from "./TempoTimesheet";
 import "./App.css";
 
@@ -123,14 +124,14 @@ export default function App() {
               {cfg.hasToken ? (
                 <>
                   ✓ — scope <em>{cfg.oauthScope ?? "tracker:read"}</em>{" "}
-                  <a href={cfg.oauthStartUrl ?? "http://127.0.0.1:8000/oauth/start"} target="_blank" rel="noreferrer">
+                  <a href={cfg.oauthStartUrl ?? "/oauth/start"} target="_blank" rel="noreferrer">
                     перевыпустить
                   </a>
                 </>
               ) : cfg.hasClientId ? (
                 <>
                   —{" "}
-                  <a href={cfg.oauthStartUrl ?? "http://127.0.0.1:8000/oauth/start"} target="_blank" rel="noreferrer">
+                  <a href={cfg.oauthStartUrl ?? "/oauth/start"} target="_blank" rel="noreferrer">
                     получить токен
                   </a>
                 </>
@@ -207,10 +208,13 @@ export default function App() {
         >
           Сегодня
         </button>
-        <button type="button" onClick={load} disabled={loading || !configured}>
+        <button type="button" className={loading ? "btn-loading" : undefined} onClick={load} disabled={loading || !configured}>
+          {loading && <LoadingSpinner size="sm" label="Загрузка" />}
           {loading ? "Загрузка…" : "Обновить"}
         </button>
       </section>
+
+      {configured === null && <LoadingPanel message="Проверка настроек…" />}
 
       {error && (
         <section className="banner banner-error">
@@ -218,6 +222,8 @@ export default function App() {
           <pre className="error-text">{error}</pre>
         </section>
       )}
+
+      {configured && loading && !report && <LoadingPanel message="Загрузка отчёта…" />}
 
       {configured && writeAccess && !writeAccess.ok && (
         <section className="banner banner-warn">
@@ -242,7 +248,7 @@ export default function App() {
             </li>
             <li>
               Получите <strong>новый</strong> токен:{" "}
-              <a href={cfg?.oauthStartUrl ?? "http://127.0.0.1:8000/oauth/start"} target="_blank" rel="noreferrer">
+              <a href={cfg?.oauthStartUrl ?? "/oauth/start"} target="_blank" rel="noreferrer">
                 /oauth/start
               </a>{" "}
               (на экране должны быть оба права; в ответе — <code>tracker:write</code> в scope).
@@ -256,7 +262,8 @@ export default function App() {
       )}
 
       {report && (
-        <>
+        <div className="loading-host">
+          {loading && <LoadingOverlay message="Обновление данных…" />}
           <section className="stats">
             <article className="stat card">
               <span className="stat-label">Всего за период</span>
@@ -277,11 +284,25 @@ export default function App() {
           </section>
 
           {report.days.length === 0 ? (
-            <p className="empty card">За период списаний не найдено.</p>
+            <>
+              <p className="empty card">За период списаний не найдено.</p>
+              <TempoTimesheet
+                report={report}
+                canEdit={writeAccess?.ok !== false}
+                writeAccessMessage={writeAccess?.message}
+                onRefresh={async () => {
+                  await load();
+                  if (configured) {
+                    fetchCheckWriteAccess().then(setWriteAccess).catch(() => undefined);
+                  }
+                }}
+              />
+            </>
           ) : (
             <TempoTimesheet
               report={report}
-              canEdit={writeAccess?.ok ?? false}
+              canEdit={writeAccess?.ok !== false}
+              writeAccessMessage={writeAccess?.message}
               onRefresh={async () => {
                 await load();
                 if (configured) {
@@ -290,7 +311,7 @@ export default function App() {
               }}
             />
           )}
-        </>
+        </div>
       )}
     </div>
   );

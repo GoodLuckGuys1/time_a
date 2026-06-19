@@ -6,6 +6,8 @@ export interface TimeEntry {
   formatted: string;
   comment: string;
   author: string;
+  authorKey?: string;
+  authorLogin?: string;
   start?: string;
 }
 
@@ -33,8 +35,12 @@ export interface TimeReport {
     issuesOnBoard: number;
   };
   period: { from: string; to: string };
+  currentUser?: { id: string; login?: string; name: string } | null;
   totalMinutes: number;
   totalFormatted: string;
+  myDays?: DayRow[];
+  myTotalMinutes?: number;
+  myTotalFormatted?: string;
   days: DayRow[];
   worklogCount: number;
   stats?: {
@@ -101,6 +107,151 @@ function formatApiError(body: Record<string, unknown>, status: number): string {
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) return detail.map(String).join("\n");
   return `Ошибка ${status}`;
+}
+
+export interface SprintLoadIssue {
+  issueKey: string;
+  issueTitle: string;
+  issueUrl: string;
+  originalMinutes: number;
+  originalFormatted: string;
+  minutes: number;
+  formatted: string;
+  spentMinutes: number;
+  spentFormatted: string;
+  status: string;
+}
+
+export interface SprintLoadAssignee {
+  id: string;
+  name: string;
+  totalOriginalMinutes: number;
+  totalOriginalFormatted: string;
+  totalMinutes: number;
+  totalFormatted: string;
+  totalSpentMinutes: number;
+  totalSpentFormatted: string;
+  issueCount: number;
+  issues: SprintLoadIssue[];
+}
+
+export interface SprintLoadGroup {
+  label: string;
+  sprintId?: string | null;
+  url?: string | null;
+  showSpent?: boolean;
+  sprintStartDate?: string | null;
+  sprintEndDate?: string | null;
+  assignees: SprintLoadAssignee[];
+  issueCount: number;
+  issuesWithoutEstimate: number;
+  totalOriginalMinutes: number;
+  totalOriginalFormatted: string;
+  totalMinutes: number;
+  totalFormatted: string;
+  totalSpentMinutes: number;
+  totalSpentFormatted: string;
+}
+
+export interface SprintLoadReport {
+  board: {
+    id: number;
+    name?: string;
+    url: string;
+  };
+  groupBy?: "agile" | "label";
+  groups?: SprintLoadGroup[];
+  activeLabel?: string | null;
+  sprint: {
+    id: number | null;
+    name: string;
+    status?: string;
+    startDate?: string | null;
+    endDate?: string | null;
+    url?: string | null;
+  } | null;
+  boardOnly?: boolean;
+  message?: string;
+  assignees: SprintLoadAssignee[];
+  issueCount: number;
+  issuesWithoutEstimate: number;
+  totalOriginalMinutes: number;
+  totalOriginalFormatted: string;
+  totalMinutes: number;
+  totalFormatted: string;
+  showSpentColumn?: boolean;
+  totalSpentMinutes?: number;
+  totalSpentFormatted?: string;
+  stats?: {
+    issuesOnBoard?: number;
+    issuesWithSprint?: number;
+  };
+}
+
+export interface AssigneeWorklogEntry {
+  id: string | number;
+  date: string;
+  minutes: number;
+  formatted: string;
+  comment: string;
+  start?: string;
+}
+
+export interface AssigneeWorklogTask {
+  issueKey: string;
+  issueTitle: string;
+  issueUrl: string;
+  totalMinutes: number;
+  totalFormatted: string;
+  entries: AssigneeWorklogEntry[];
+}
+
+export interface AssigneeOption {
+  id: string;
+  name: string;
+  totalMinutes: number;
+  totalFormatted: string;
+  worklogCount: number;
+}
+
+export interface AssigneeWorklogReport {
+  board: { id: number; name?: string; url: string };
+  period: { from: string; to: string };
+  assignees: AssigneeOption[];
+  currentUser: { id: string; name: string } | null;
+  selectedAssigneeId: string | null;
+  selectedAssigneeName: string | null;
+  tasks: AssigneeWorklogTask[];
+  totalMinutes: number;
+  totalFormatted: string;
+  worklogCount: number;
+}
+
+export async function fetchAssigneeWorklogs(
+  from: string,
+  to: string,
+  boardId?: number,
+  assigneeId?: string,
+): Promise<AssigneeWorklogReport> {
+  const params = new URLSearchParams({ from, to });
+  if (boardId != null) params.set("board_id", String(boardId));
+  if (assigneeId) params.set("assignee", assigneeId);
+  const res = await fetch(`/api/assignee-worklogs?${params}`);
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) throw new Error(formatApiError(body, res.status));
+  return body as AssigneeWorklogReport;
+}
+
+export async function fetchSprintLoad(boardId?: number): Promise<SprintLoadReport> {
+  const params = new URLSearchParams();
+  if (boardId != null) params.set("board_id", String(boardId));
+  const qs = params.toString();
+  const res = await fetch(`/api/sprint-load${qs ? `?${qs}` : ""}`);
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) {
+    throw new Error(formatApiError(body, res.status));
+  }
+  return body as SprintLoadReport;
 }
 
 export async function fetchTimeReport(from: string, to: string): Promise<TimeReport> {

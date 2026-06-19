@@ -1,12 +1,13 @@
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import settings
+from .config import env_snapshot, settings
 from .oauth_routes import router as oauth_router
 from pydantic import BaseModel
 
@@ -35,22 +36,23 @@ async def health() -> dict[str, str]:
 
 @app.get("/api/config")
 async def config_status() -> dict:
+    cfg = env_snapshot()
     return {
-        "configured": settings.is_configured,
-        "boardId": settings.board_id,
-        "orgHeader": settings.org_header,
+        "configured": cfg.is_configured,
+        "boardId": cfg.board_id,
+        "orgHeader": cfg.org_header,
         "envPath": str(Path(__file__).resolve().parents[2] / ".env"),
-        "hasToken": bool(settings.tracker_token),
-        "hasOrgId": bool(settings.org_id),
-        "hasClientId": bool(settings.oauth_client_id),
-        "hasClientSecret": bool(settings.oauth_client_secret),
-        "oauthStartUrl": "http://127.0.0.1:8000/oauth/start",
-        "oauthRedirectUri": settings.oauth_redirect_uri,
-        "oauthScope": settings.oauth_scope,
-        "canEditWorklogs": settings.is_configured,
+        "hasToken": bool(cfg.tracker_token),
+        "hasOrgId": bool(cfg.org_id),
+        "hasClientId": bool(cfg.oauth_client_id),
+        "hasClientSecret": bool(cfg.oauth_client_secret),
+        "oauthStartUrl": "/oauth/start",
+        "oauthRedirectUri": cfg.oauth_redirect_uri,
+        "oauthScope": cfg.oauth_scope,
+        "canEditWorklogs": cfg.is_configured,
         "oauthAppInfoUrl": (
-            f"https://oauth.yandex.ru/client/{settings.oauth_client_id}/info"
-            if settings.oauth_client_id
+            f"https://oauth.yandex.ru/client/{cfg.oauth_client_id}/info"
+            if cfg.oauth_client_id
             else None
         ),
     }
@@ -156,11 +158,63 @@ async def org_help() -> str:
 </html>"""
 
 
+@app.get("/api/assignee-worklogs")
+async def assignee_worklogs(
+    date_from: Optional[date] = Query(None, alias="from"),
+    date_to: Optional[date] = Query(None, alias="to"),
+    board_id: Optional[int] = Query(None),
+    assignee: Optional[str] = Query(None, description="login или id автора списания"),
+) -> dict:
+    if not settings.is_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Задайте TRACKER_OAUTH_TOKEN и TRACKER_ORG_ID в файле .env",
+        )
+
+    today = today_report()
+    end = date_to or today
+    start = date_from or (end - timedelta(days=30))
+    if start > end:
+        raise HTTPException(status_code=400, detail="Дата «с» не может быть позже даты «по»")
+
+    target_board = board_id or settings.board_id
+    try:
+        return await client.fetch_assignee_worklog_report(
+            target_board,
+            start,
+            end,
+            assignee_key=assignee.strip() if assignee else None,
+        )
+    except TrackerError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=format_api_error(exc.message),
+        ) from exc
+
+
+@app.get("/api/sprint-load")
+async def sprint_load(board_id: Optional[int] = Query(None)) -> dict:
+    if not settings.is_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Задайте TRACKER_OAUTH_TOKEN и TRACKER_ORG_ID в файле .env",
+        )
+
+    target_board = board_id or settings.board_id
+    try:
+        return await client.fetch_sprint_load_report(target_board)
+    except TrackerError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=format_api_error(exc.message),
+        ) from exc
+
+
 @app.get("/api/time-report")
 async def time_report(
-    date_from: date | None = Query(None, alias="from"),
-    date_to: date | None = Query(None, alias="to"),
-    board_id: int | None = Query(None),
+    date_from: Optional[date] = Query(None, alias="from"),
+    date_to: Optional[date] = Query(None, alias="to"),
+    board_id: Optional[int] = Query(None),
 ) -> dict:
     if not settings.is_configured:
         raise HTTPException(
@@ -187,13 +241,13 @@ async def time_report(
 
 class WorklogUpdateBody(BaseModel):
     minutes: int
-    comment: str | None = None
+    comment: Optional[str] = None
 
 
 class WorklogCreateBody(BaseModel):
     day: date
     minutes: int
-    comment: str | None = None
+    comment: Optional[str] = None
 
 
 def _require_configured() -> None:

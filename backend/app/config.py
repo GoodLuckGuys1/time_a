@@ -20,6 +20,8 @@ class Settings:
     oauth_client_secret: str
     oauth_redirect_uri: str
     oauth_scope: str
+    sprint_tag_prefix: str
+    extra_worklog_logins: tuple[str, ...]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -34,7 +36,12 @@ class Settings:
             "TRACKER_OAUTH_REDIRECT_URI",
             "https://oauth.yandex.ru/verification_code",
         ).strip()
-        oauth_scope = os.getenv("TRACKER_OAUTH_SCOPE", "tracker:read").strip() or "tracker:read"
+        oauth_scope = os.getenv("TRACKER_OAUTH_SCOPE", "tracker:read tracker:write").strip() or "tracker:read tracker:write"
+        sprint_tag_prefix = os.getenv("TRACKER_SPRINT_TAG_PREFIX", "").strip()
+        extra_raw = os.getenv("TRACKER_EXTRA_WORKLOG_LOGINS", "")
+        extra_worklog_logins = tuple(
+            login.strip() for login in extra_raw.split(",") if login.strip()
+        )
         return cls(
             tracker_token=token,
             org_id=org_id,
@@ -45,6 +52,8 @@ class Settings:
             oauth_client_secret=client_secret,
             oauth_redirect_uri=redirect_uri,
             oauth_scope=oauth_scope,
+            sprint_tag_prefix=sprint_tag_prefix,
+            extra_worklog_logins=extra_worklog_logins,
         )
 
     @property
@@ -53,3 +62,10 @@ class Settings:
 
 
 settings = Settings.from_env()
+
+
+def env_snapshot() -> Settings:
+    """Актуальные значения из .env (uvicorn --reload не перечитывает файл)."""
+    load_dotenv(_ROOT / ".env", override=True)
+    load_dotenv(_ROOT / "backend" / ".env", override=True)
+    return Settings.from_env()

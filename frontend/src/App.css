@@ -748,6 +748,322 @@ code {
   border-radius: 6px;
 }
 
+.sprint-load {
+  padding: 0.25rem 0.5rem 0.75rem;
+}
+
+.sprint-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.sprint-name {
+  font-weight: 700;
+  font-size: 1rem;
+  color: #9ec4ff;
+  text-decoration: none;
+}
+
+.sprint-name:hover {
+  text-decoration: underline;
+}
+
+.sprint-period {
+  margin-left: 0.65rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.sprint-meta {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.sprint-warn {
+  color: #e8b86d;
+}
+
+.sprint-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.sprint-table th,
+.sprint-table td {
+  padding: 0.5rem 0.65rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+}
+
+.sprint-table thead th {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.sprint-num {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sprint-hours {
+  font-weight: 700;
+  color: #7ddea8;
+}
+
+.sprint-spent {
+  font-weight: 600;
+  color: #9ec4ff;
+}
+
+.sprint-row {
+  cursor: pointer;
+}
+
+.sprint-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sprint-toggle {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  width: 1.25rem;
+  margin-right: 0.25rem;
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.sprint-issue-row td {
+  background: rgba(0, 0, 0, 0.12);
+  font-size: 0.82rem;
+}
+
+.sprint-issue-cell {
+  padding-left: 2rem !important;
+}
+
+.sprint-issue-status {
+  margin-left: 0.5rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.sprint-table tfoot td {
+  font-weight: 700;
+  border-top: 2px solid rgba(255, 255, 255, 0.12);
+}
+
+.loading-spinner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.loading-spinner-ring {
+  display: block;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  border-top-color: var(--accent, #6ea8fe);
+  animation: loading-spin 0.75s linear infinite;
+}
+
+.loading-spinner-sm .loading-spinner-ring {
+  width: 1rem;
+  height: 1rem;
+}
+
+.loading-spinner-md .loading-spinner-ring {
+  width: 1.5rem;
+  height: 1.5rem;
+  border-width: 2px;
+}
+
+.loading-spinner-lg .loading-spinner-ring {
+  width: 2.25rem;
+  height: 2.25rem;
+  border-width: 3px;
+}
+
+@keyframes loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.loading-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.85rem;
+  min-height: 10rem;
+  padding: 2rem 1.5rem;
+  text-align: center;
+}
+
+.loading-panel-text {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+}
+
+.loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  border-radius: inherit;
+  background: rgba(18, 20, 28, 0.72);
+  backdrop-filter: blur(2px);
+}
+
+.loading-host {
+  position: relative;
+}
+
+.btn-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.sprint-empty {
+  padding: 1rem 0.5rem;
+  color: var(--text-muted);
+}
+
+.sprint-error {
+  color: #f0a0a0;
+}
+
+.sprint-hint {
+  margin: 0.75rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.sprint-hint-top {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.65rem;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+}
+
+.sprint-group {
+  margin-bottom: 1.25rem;
+}
+
+.sprint-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem 1rem;
+  margin-bottom: 0.5rem;
+  padding: 0.35rem 0.15rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.sprint-group-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #9ec4ff;
+}
+
+.sprint-group-title a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.sprint-group-title a:hover {
+  text-decoration: underline;
+}
+
+.sprint-group-meta {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sprint-group-badge {
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: rgba(125, 222, 168, 0.15);
+  color: #7ddea8;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.assignee-worklog-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1rem 1.5rem;
+  margin-bottom: 1rem;
+}
+
+.assignee-select-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.assignee-select {
+  min-width: 280px;
+  max-width: 100%;
+  padding: 0.45rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.assignee-worklog-total {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.assignee-worklog-total strong {
+  color: #9ec4ff;
+  font-variant-numeric: tabular-nums;
+}
+
+.assignee-worklog-meta {
+  font-size: 0.82rem;
+}
+
+.assignee-entry-date {
+  margin-right: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 640px) {
   .hero {
     flex-direction: column;

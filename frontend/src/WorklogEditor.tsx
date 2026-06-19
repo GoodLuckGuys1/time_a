@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { createWorklog, deleteWorklog, updateWorklog } from "./api";
-import type { GroupMode } from "./tempoData";
+import { createWorklog, deleteWorklog, fetchCheckWriteAccess, updateWorklog } from "./api";
+import { isOwnWorklogEntry, type GroupMode } from "./tempoData";
 import {
   formatCellMinutes,
   minutesFromParts,
@@ -14,6 +14,8 @@ interface EntryDraft {
   issueTitle: string;
   issueUrl: string;
   author: string;
+  authorKey?: string;
+  authorLogin?: string;
   hours: number;
   minutes: number;
   comment: string;
@@ -22,21 +24,68 @@ interface EntryDraft {
 interface WorklogEditorProps {
   cell: TimesheetCell;
   groupBy: GroupMode;
-  canEdit: boolean;
+  hasWriteAccess: boolean;
+  allowIssueEdit?: boolean;
+  currentUser?: { id: string; login?: string; name: string } | null;
+  writeAccessMessage?: string;
   onClose: () => void;
   onChanged: () => void;
 }
 
-export function WorklogEditor({ cell, groupBy, canEdit, onClose, onChanged }: WorklogEditorProps) {
+export function WorklogEditor({
+  cell,
+  groupBy,
+  hasWriteAccess,
+  allowIssueEdit = true,
+  currentUser,
+  writeAccessMessage,
+  onClose,
+  onChanged,
+}: WorklogEditorProps) {
   const [drafts, setDrafts] = useState<EntryDraft[]>([]);
   const [newHours, setNewHours] = useState(0);
   const [newMinutes, setNewMinutes] = useState(0);
   const [newComment, setNewComment] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [writeOk, setWriteOk] = useState(hasWriteAccess);
+  const [writeChecked, setWriteChecked] = useState(hasWriteAccess === false);
+
+  useEffect(() => {
+    setWriteOk(hasWriteAccess);
+    if (hasWriteAccess) setWriteChecked(true);
+  }, [hasWriteAccess]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchCheckWriteAccess()
+      .then((r) => {
+        if (cancelled) return;
+        setWriteOk(r.ok);
+        setWriteChecked(true);
+      })
+      .catch(() => {
+        if (!cancelled) setWriteChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const issueKeyForCreate = cell.issueKey ?? cell.entries[0]?.issueKey ?? null;
-  const canCreate = canEdit && groupBy === "issue" && !!issueKeyForCreate;
+  const canCreate =
+    writeOk &&
+    allowIssueEdit &&
+    groupBy === "issue" &&
+    !!issueKeyForCreate;
+
+  const canEditDraft = (draft: EntryDraft) => {
+    if (!writeOk) return false;
+    if (groupBy === "issue") {
+      return allowIssueEdit && isOwnWorklogEntry(draft, currentUser);
+    }
+    return true;
+  };
 
   useEffect(() => {
     setDrafts(
@@ -48,6 +97,8 @@ export function WorklogEditor({ cell, groupBy, canEdit, onClose, onChanged }: Wo
           issueTitle: e.issueTitle,
           issueUrl: e.issueUrl,
           author: e.author,
+          authorKey: e.authorKey,
+          authorLogin: e.authorLogin,
           hours,
           minutes,
           comment: e.comment,
@@ -60,10 +111,7 @@ export function WorklogEditor({ cell, groupBy, canEdit, onClose, onChanged }: Wo
     setError(null);
   }, [cell]);
 
-  const title =
-    groupBy === "issue"
-      ? `${cell.rowId} · ${cell.date}`
-      : `${cell.rowId} · ${cell.date}`;
+  const title = `${cell.rowId} · ${cell.date}`;
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -106,6 +154,8 @@ export function WorklogEditor({ cell, groupBy, canEdit, onClose, onChanged }: Wo
       });
     });
 
+  const assigneeFilterBlocksEdit = groupBy === "issue" && writeOk && !allowIssueEdit;
+
   return (
     <div className="wl-backdrop" onClick={onClose} role="presentation">
       <div
@@ -124,10 +174,17 @@ export function WorklogEditor({ cell, groupBy, canEdit, onClose, onChanged }: Wo
           </button>
         </header>
 
-        {!canEdit && (
+        {writeChecked && !writeOk && (
           <p className="wl-hint banner-warn">
-            Для редактирования добавьте в OAuth право <code>tracker:write</code>, укажите в .env{" "}
-            <code>TRACKER_OAUTH_SCOPE=tracker:read tracker:write</code> и получите новый токен.
+            {writeAccessMessage ??
+              "В токене нет права tracker:write. Проверьте TRACKER_OAUTH_SCOPE в .env и перевыпустите токен через /oauth/start."}
+          </p>
+        )}
+
+        {assigneeFilterBlocksEdit && (
+          <p className="wl-hint banner-warn">
+            Сейчас выбран другой исполнитель. Чтобы редактировать свои списания, выберите себя или
+            «Все» в фильтре над таблицей.
           </p>
         )}
 
@@ -135,81 +192,87 @@ export function WorklogEditor({ cell, groupBy, canEdit, onClose, onChanged }: Wo
           <p className="wl-empty">Нет записей за этот день.</p>
         )}
 
-        {drafts.map((draft, idx) => (
-          <div key={`${draft.issueKey}-${draft.worklogId}`} className="wl-entry">
-            {groupBy === "user" && (
-              <a href={draft.issueUrl} target="_blank" rel="noreferrer" className="wl-issue">
-                {draft.issueKey}
-              </a>
-            )}
-            {draft.author && <span className="wl-author">{draft.author}</span>}
-            <div className="wl-duration">
-              <label>
-                Часы
-                <input
-                  type="number"
-                  min={0}
-                  disabled={!canEdit || busy}
-                  value={draft.hours}
-                  onChange={(e) => {
-                    const hours = Number(e.target.value);
-                    setDrafts((list) =>
-                      list.map((d, i) => (i === idx ? { ...d, hours } : d)),
-                    );
-                  }}
-                />
-              </label>
-              <label>
-                Мин
-                <input
-                  type="number"
-                  min={0}
-                  max={59}
-                  disabled={!canEdit || busy}
-                  value={draft.minutes}
-                  onChange={(e) => {
-                    const minutes = Number(e.target.value);
-                    setDrafts((list) =>
-                      list.map((d, i) => (i === idx ? { ...d, minutes } : d)),
-                    );
-                  }}
-                />
-              </label>
-              <span className="wl-preview">
-                {formatCellMinutes(minutesFromParts(draft.hours, draft.minutes))}
-              </span>
-            </div>
-            <label className="wl-comment-label">
-              Комментарий
-              <input
-                type="text"
-                disabled={!canEdit || busy}
-                value={draft.comment}
-                onChange={(e) => {
-                  const comment = e.target.value;
-                  setDrafts((list) =>
-                    list.map((d, i) => (i === idx ? { ...d, comment } : d)),
-                  );
-                }}
-              />
-            </label>
-            {canEdit && (
-              <div className="wl-actions">
-                <button type="button" disabled={busy} onClick={() => saveEntry(draft)}>
-                  Сохранить
-                </button>
-                <button
-                  type="button"
-                  className="wl-danger"
-                  disabled={busy}
-                  onClick={() => removeEntry(draft)}
-                >
-                  Удалить
-                </button>
+        {drafts.map((draft, idx) => {
+          const editable = canEditDraft(draft);
+          return (
+            <div key={`${draft.issueKey}-${draft.worklogId}`} className="wl-entry">
+              {groupBy === "user" && (
+                <a href={draft.issueUrl} target="_blank" rel="noreferrer" className="wl-issue">
+                  {draft.issueKey}
+                </a>
+              )}
+              {draft.author && <span className="wl-author">{draft.author}</span>}
+              {!editable && writeOk && groupBy === "issue" && (
+                <p className="wl-hint">Только просмотр — это списание другого исполнителя.</p>
+              )}
+              <div className="wl-duration">
+                <label>
+                  Часы
+                  <input
+                    type="number"
+                    min={0}
+                    disabled={!editable || busy}
+                    value={draft.hours}
+                    onChange={(e) => {
+                      const hours = Number(e.target.value);
+                      setDrafts((list) =>
+                        list.map((d, i) => (i === idx ? { ...d, hours } : d)),
+                      );
+                    }}
+                  />
+                </label>
+                <label>
+                  Мин
+                  <input
+                    type="number"
+                    min={0}
+                    max={59}
+                    disabled={!editable || busy}
+                    value={draft.minutes}
+                    onChange={(e) => {
+                      const minutes = Number(e.target.value);
+                      setDrafts((list) =>
+                        list.map((d, i) => (i === idx ? { ...d, minutes } : d)),
+                      );
+                    }}
+                  />
+                </label>
+                <span className="wl-preview">
+                  {formatCellMinutes(minutesFromParts(draft.hours, draft.minutes))}
+                </span>
               </div>
-            )}
-          </div>
-        ))}
+              <label className="wl-comment-label">
+                Комментарий
+                <input
+                  type="text"
+                  disabled={!editable || busy}
+                  value={draft.comment}
+                  onChange={(e) => {
+                    const comment = e.target.value;
+                    setDrafts((list) =>
+                      list.map((d, i) => (i === idx ? { ...d, comment } : d)),
+                    );
+                  }}
+                />
+              </label>
+              {editable && (
+                <div className="wl-actions">
+                  <button type="button" disabled={busy} onClick={() => saveEntry(draft)}>
+                    Сохранить
+                  </button>
+                  <button
+                    type="button"
+                    className="wl-danger"
+                    disabled={busy}
+                    onClick={() => removeEntry(draft)}
+                  >
+                    Удалить
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
 
         {canCreate && (
           <div className="wl-entry wl-new">
@@ -253,12 +316,6 @@ export function WorklogEditor({ cell, groupBy, canEdit, onClose, onChanged }: Wo
         )}
 
         {error && <p className="wl-error">{error}</p>}
-
-        <footer className="wl-footer">
-          <span className="wl-total">
-            Итого: {formatCellMinutes(cell.totalMinutes) || "0h"}
-          </span>
-        </footer>
       </div>
     </div>
   );

@@ -3,7 +3,7 @@ from urllib.parse import quote
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from .config import settings
+from .config import env_snapshot
 
 router = APIRouter(prefix="/oauth", tags=["oauth"])
 
@@ -87,17 +87,17 @@ async def oauth_callback() -> str:
 
 @router.get("/start", response_model=None)
 async def oauth_start():
-    if not settings.oauth_client_id:
+    cfg = env_snapshot()
+    if not cfg.oauth_client_id:
         return HTMLResponse(
-            _SETUP_HTML.format(redirect_uri=settings.oauth_redirect_uri),
+            _SETUP_HTML.format(redirect_uri=cfg.oauth_redirect_uri),
             status_code=200,
         )
 
-    client_id = quote(settings.oauth_client_id, safe="")
-    # Пробелы между scope — как в документации Яндекс ID (tracker:read tracker:write)
-    scope_raw = " ".join(settings.oauth_scope.replace(",", " ").split()) or "tracker:read tracker:write"
+    client_id = quote(cfg.oauth_client_id, safe="")
+    scope_raw = " ".join(cfg.oauth_scope.replace(",", " ").split()) or "tracker:read tracker:write"
     scope = quote(scope_raw, safe="")
-    redirect_uri = quote(settings.oauth_redirect_uri, safe="")
+    redirect_uri = quote(cfg.oauth_redirect_uri, safe="")
     url = (
         "https://oauth.yandex.ru/authorize"
         f"?response_type=token"
