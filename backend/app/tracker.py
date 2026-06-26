@@ -65,11 +65,16 @@ _WORKLOG_SEARCH_CAP = 50
 _MAX_PER_USER_WORKLOG_FETCHES = 120
 _ENRICH_KEYS_CHUNK = 50
 _ENRICH_PARALLEL_BATCHES = 4
-_board_worklog_cache: dict[tuple[int, str, str], tuple[float, BoardWorklogs]] = {}
+_board_worklog_cache: dict[tuple, tuple[float, BoardWorklogs]] = {}
 _board_issues_cache: dict[tuple[int, str, bool], tuple[float, list[dict[str, Any]]]] = {}
 _sprint_load_cache: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
 _org_user_logins_cache: tuple[float, list[str]] | None = None
 _tracker_cache_lock = asyncio.Lock()
+
+
+def invalidate_board_worklog_cache() -> None:
+    """Сброс кэша списаний после create/update/delete."""
+    _board_worklog_cache.clear()
 
 
 class TrackerClient:
@@ -901,17 +906,42 @@ class TrackerClient:
         *,
         minutes: int,
         comment: str | None = None,
+        day: date | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"duration": minutes_to_tracker_duration(minutes)}
         if comment is not None:
             body["comment"] = comment
+        if day is not None:
+            body["start"] = day_start_iso(day)
+
         async with httpx.AsyncClient(timeout=60.0) as client:
-            return await self._request(
-                client,
-                "PATCH",
-                f"/v3/issues/{issue_key}/worklog/{worklog_id}",
-                json=body,
-            )
+            try:
+                result = await self._request(
+                    client,
+                    "PATCH",
+                    f"/v3/issues/{issue_key}/worklog/{worklog_id}",
+                    json=body,
+                )
+            except TrackerError as exc:
+                if day is None or exc.status_code not in (400, 422):
+                    raise
+                await self._request(
+                    client,
+                    "DELETE",
+                    f"/v3/issues/{issue_key}/worklog/{worklog_id}",
+                )
+                result = await self._request(
+                    client,
+                    "POST",
+                    f"/v3/issues/{issue_key}/worklog",
+                    json={
+                        "start": day_start_iso(day),
+                        "duration": minutes_to_tracker_duration(minutes),
+                        **({"comment": comment} if comment else {}),
+                    },
+                )
+        invalidate_board_worklog_cache()
+        return result
 
     async def delete_worklog(self, issue_key: str, worklog_id: str | int) -> None:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -920,6 +950,7 @@ class TrackerClient:
                 "DELETE",
                 f"/v3/issues/{issue_key}/worklog/{worklog_id}",
             )
+        invalidate_board_worklog_cache()
 
     async def check_write_scope(self) -> dict[str, Any]:
         """Проверяет, есть ли у текущего токена tracker:write (без изменения данных)."""
@@ -954,12 +985,14 @@ class TrackerClient:
         if comment:
             body["comment"] = comment
         async with httpx.AsyncClient(timeout=60.0) as client:
-            return await self._request(
+            result = await self._request(
                 client,
                 "POST",
                 f"/v3/issues/{issue_key}/worklog",
                 json=body,
             )
+        invalidate_board_worklog_cache()
+        return result
 
 
 def _board_summary(board: dict[str, Any]) -> dict[str, Any]:

@@ -22,6 +22,7 @@ export interface TimesheetCellEntry {
   issueKey: string;
   issueUrl: string;
   issueTitle: string;
+  date: string;
   minutes: number;
   formatted: string;
   comment: string;
@@ -150,6 +151,11 @@ export function listIssueAssignees(report: TimeReport): IssueAssigneeOption[] {
     .sort((a, b) => a.name.localeCompare(b.name, "ru-RU"));
 }
 
+function worklogEntryDate(start: string | undefined, fallback: string): string {
+  if (start && start.length >= 10) return start.slice(0, 10);
+  return fallback;
+}
+
 export function buildTimesheet(
   report: TimeReport,
   mode: GroupMode,
@@ -203,6 +209,7 @@ export function buildTimesheet(
           issueKey: entry.issueKey ?? task.issueKey,
           issueUrl: task.issueUrl,
           issueTitle: task.issueTitle,
+          date: worklogEntryDate(entry.start, day.date),
           minutes,
           formatted: entry.formatted,
           comment: entry.comment,

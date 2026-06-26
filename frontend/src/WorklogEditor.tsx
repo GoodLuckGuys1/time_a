@@ -16,6 +16,7 @@ interface EntryDraft {
   author: string;
   authorKey?: string;
   authorLogin?: string;
+  date: string;
   hours: number;
   minutes: number;
   comment: string;
@@ -29,7 +30,7 @@ interface WorklogEditorProps {
   currentUser?: { id: string; login?: string; name: string } | null;
   writeAccessMessage?: string;
   onClose: () => void;
-  onChanged: () => void;
+  onChanged: () => void | Promise<void>;
 }
 
 export function WorklogEditor({
@@ -99,6 +100,7 @@ export function WorklogEditor({
           author: e.author,
           authorKey: e.authorKey,
           authorLogin: e.authorLogin,
+          date: e.date,
           hours,
           minutes,
           comment: e.comment,
@@ -118,7 +120,7 @@ export function WorklogEditor({
     setError(null);
     try {
       await fn();
-      onChanged();
+      await onChanged();
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Ошибка сохранения");
@@ -131,9 +133,11 @@ export function WorklogEditor({
     run(async () => {
       const total = minutesFromParts(draft.hours, draft.minutes);
       if (total <= 0) throw new Error("Укажите длительность больше 0");
+      if (!draft.date) throw new Error("Укажите дату списания");
       await updateWorklog(draft.issueKey, draft.worklogId, {
         minutes: total,
         comment: draft.comment || undefined,
+        day: draft.date,
       });
     });
 
@@ -205,6 +209,18 @@ export function WorklogEditor({
               {!editable && writeOk && groupBy === "issue" && (
                 <p className="wl-hint">Только просмотр — это списание другого исполнителя.</p>
               )}
+              <label className="wl-date-label">
+                Дата списания
+                <input
+                  type="date"
+                  disabled={!editable || busy}
+                  value={draft.date}
+                  onChange={(e) => {
+                    const date = e.target.value;
+                    setDrafts((list) => list.map((d, i) => (i === idx ? { ...d, date } : d)));
+                  }}
+                />
+              </label>
               <div className="wl-duration">
                 <label>
                   Часы

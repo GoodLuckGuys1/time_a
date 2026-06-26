@@ -242,6 +242,7 @@ async def time_report(
 class WorklogUpdateBody(BaseModel):
     minutes: int
     comment: Optional[str] = None
+    day: Optional[date] = None
 
 
 class WorklogCreateBody(BaseModel):
@@ -279,6 +280,7 @@ async def patch_worklog(
             worklog_id,
             minutes=body.minutes,
             comment=body.comment,
+            day=body.day,
         )
     except TrackerError as exc:
         raise _tracker_http_error(exc) from exc

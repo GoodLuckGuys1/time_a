@@ -267,7 +267,7 @@ export async function fetchTimeReport(from: string, to: string): Promise<TimeRep
 export async function updateWorklog(
   issueKey: string,
   worklogId: string | number,
-  payload: { minutes: number; comment?: string },
+  payload: { minutes: number; comment?: string; day?: string },
 ): Promise<void> {
   const res = await fetch(`/api/issues/${encodeURIComponent(issueKey)}/worklog/${worklogId}`, {
     method: "PATCH",

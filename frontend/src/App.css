@@ -605,6 +605,24 @@ h1 {
   margin-bottom: 0.5rem;
 }
 
+.wl-date-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 0.5rem;
+}
+
+.wl-date-label input {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
 .wl-duration {
   display: flex;
   flex-wrap: wrap;
