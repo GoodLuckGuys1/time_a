@@ -193,7 +193,13 @@ async def assignee_worklogs(
 
 
 @app.get("/api/sprint-load")
-async def sprint_load(board_id: Optional[int] = Query(None)) -> dict:
+async def sprint_load(
+    board_id: Optional[int] = Query(None),
+    assignee: Optional[str] = Query(
+        None,
+        description="login или id исполнителя — точечное обновление списаний в спринте",
+    ),
+) -> dict:
     if not settings.is_configured:
         raise HTTPException(
             status_code=503,
@@ -202,7 +208,10 @@ async def sprint_load(board_id: Optional[int] = Query(None)) -> dict:
 
     target_board = board_id or settings.board_id
     try:
-        return await client.fetch_sprint_load_report(target_board)
+        return await client.fetch_sprint_load_report(
+            target_board,
+            assignee=assignee.strip() if assignee else None,
+        )
     except TrackerError as exc:
         raise HTTPException(
             status_code=exc.status_code,
@@ -215,6 +224,10 @@ async def time_report(
     date_from: Optional[date] = Query(None, alias="from"),
     date_to: Optional[date] = Query(None, alias="to"),
     board_id: Optional[int] = Query(None),
+    assignee: Optional[str] = Query(
+        None,
+        description="login или id автора — точечная загрузка только его списаний",
+    ),
 ) -> dict:
     if not settings.is_configured:
         raise HTTPException(
@@ -231,7 +244,12 @@ async def time_report(
     target_board = board_id or settings.board_id
 
     try:
-        return await client.fetch_time_report(target_board, start, end)
+        return await client.fetch_time_report(
+            target_board,
+            start,
+            end,
+            assignee=assignee.strip() if assignee else None,
+        )
     except TrackerError as exc:
         raise HTTPException(
             status_code=exc.status_code,

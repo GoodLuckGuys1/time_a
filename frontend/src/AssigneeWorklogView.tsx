@@ -16,6 +16,8 @@ export function AssigneeWorklogView({ boardId, periodFrom, periodTo }: AssigneeW
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
 
+  const [everyoneLoading, setEveryoneLoading] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -25,6 +27,9 @@ export function AssigneeWorklogView({ boardId, periodFrom, periodTo }: AssigneeW
       .then((report) => {
         if (cancelled) return;
         setData(report);
+        if (!selectedId && report.selectedAssigneeId) {
+          setSelectedId(report.selectedAssigneeId);
+        }
       })
       .catch((e) => {
         if (!cancelled) {
@@ -41,7 +46,7 @@ export function AssigneeWorklogView({ boardId, periodFrom, periodTo }: AssigneeW
   }, [boardId, periodFrom, periodTo, selectedId]);
 
   if (loading && !data) {
-    return <LoadingPanel message="Загрузка списаний…" />;
+    return <LoadingPanel message="Загрузка ваших списаний…" />;
   }
 
   if (error) {
@@ -57,9 +62,24 @@ export function AssigneeWorklogView({ boardId, periodFrom, periodTo }: AssigneeW
     setSelectedId(id);
   };
 
+  const loadEveryone = async () => {
+    setEveryoneLoading(true);
+    setError(null);
+    try {
+      const report = await fetchAssigneeWorklogs(periodFrom, periodTo, boardId, "__all__");
+      setData(report);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось загрузить всех исполнителей");
+    } finally {
+      setEveryoneLoading(false);
+    }
+  };
+
   return (
     <div className="assignee-worklog loading-host">
-      {loading && <LoadingOverlay message="Загрузка списаний…" />}
+      {(loading || everyoneLoading) && (
+        <LoadingOverlay message={everyoneLoading ? "Загрузка всех исполнителей…" : "Загрузка списаний…"} />
+      )}
       <div className="assignee-worklog-toolbar">
         <label className="assignee-select-label">
           Исполнитель
@@ -67,7 +87,7 @@ export function AssigneeWorklogView({ boardId, periodFrom, periodTo }: AssigneeW
             className="assignee-select"
             value={selectedId || data.selectedAssigneeId || ""}
             onChange={(e) => handleAssigneeChange(e.target.value)}
-            disabled={loading}
+            disabled={loading || everyoneLoading}
           >
             {data.assignees.length === 0 ? (
               <option value="">Нет списаний за период</option>
@@ -81,6 +101,16 @@ export function AssigneeWorklogView({ boardId, periodFrom, periodTo }: AssigneeW
             )}
           </select>
         </label>
+        {data.scope !== "all" && (
+          <button
+            type="button"
+            className="btn-secondary assignee-refresh-btn"
+            disabled={everyoneLoading || loading}
+            onClick={() => void loadEveryone()}
+          >
+            {everyoneLoading ? "Загрузка всех…" : "Загрузить всех"}
+          </button>
+        )}
         {data.selectedAssigneeName && (
           <span className="assignee-worklog-total">
             Итого: <strong>{data.totalFormatted}</strong>

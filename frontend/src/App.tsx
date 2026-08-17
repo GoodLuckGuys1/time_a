@@ -5,9 +5,11 @@ import {
   fetchTimeReport,
   testOrgId,
   type ConfigStatus,
+  type TimeReport,
 } from "./api";
 import { LoadingOverlay, LoadingPanel, LoadingSpinner } from "./LoadingSpinner";
 import { TempoTimesheet } from "./TempoTimesheet";
+import { mergeAssigneeIntoReport } from "./tempoData";
 import "./App.css";
 
 /** Календарная дата в локальной зоне браузера (не UTC из toISOString). */
@@ -32,10 +34,11 @@ export default function App() {
   const initial = useMemo(defaultRange, []);
   const [from, setFrom] = useState(initial.from);
   const [to, setTo] = useState(initial.to);
-  const [report, setReport] = useState<Awaited<ReturnType<typeof fetchTimeReport>> | null>(null);
+  const [report, setReport] = useState<TimeReport | null>(null);
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [cfg, setCfg] = useState<ConfigStatus | null>(null);
   const [loading, setLoading] = useState(false);
+  const [assigneeRefreshing, setAssigneeRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [orgInput, setOrgInput] = useState("");
   const [orgHeader, setOrgHeader] = useState("X-Org-ID");
@@ -55,11 +58,11 @@ export default function App() {
       .catch(() => setConfigured(false));
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (everyone = false) => {
     setLoading(true);
     setError(null);
     try {
-      setReport(await fetchTimeReport(from, to));
+      setReport(await fetchTimeReport(from, to, everyone ? "__all__" : undefined));
     } catch (e) {
       setReport(null);
       setError(e instanceof Error ? e.message : "Неизвестная ошибка");
@@ -67,6 +70,33 @@ export default function App() {
       setLoading(false);
     }
   }, [from, to]);
+
+  const refreshAssignee = useCallback(
+    async (assigneeId: string) => {
+      if (assigneeId === "__all__") {
+        await load(true);
+        return;
+      }
+      setAssigneeRefreshing(true);
+      setError(null);
+      try {
+        const patch = await fetchTimeReport(from, to, assigneeId);
+        setReport((prev) => (prev ? mergeAssigneeIntoReport(prev, patch, assigneeId) : patch));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Не удалось обновить исполнителя");
+      } finally {
+        setAssigneeRefreshing(false);
+      }
+    },
+    [from, to, load],
+  );
+
+  const handleTimesheetRefresh = useCallback(async () => {
+    await load(report?.scope === "all");
+    if (configured) {
+      fetchCheckWriteAccess().then(setWriteAccess).catch(() => undefined);
+    }
+  }, [load, configured, report?.scope]);
 
   useEffect(() => {
     if (configured) load();
@@ -223,7 +253,9 @@ export default function App() {
         </section>
       )}
 
-      {configured && loading && !report && <LoadingPanel message="Загрузка отчёта…" />}
+      {configured && (loading || assigneeRefreshing) && !report && (
+        <LoadingPanel message="Загрузка ваших задач…" />
+      )}
 
       {configured && writeAccess && !writeAccess.ok && (
         <section className="banner banner-warn">
@@ -263,7 +295,15 @@ export default function App() {
 
       {report && (
         <div className="loading-host">
-          {loading && <LoadingOverlay message="Обновление данных…" />}
+          {(loading || assigneeRefreshing) && (
+            <LoadingOverlay
+              message={
+                assigneeRefreshing
+                  ? "Обновление исполнителя…"
+                  : "Обновление данных…"
+              }
+            />
+          )}
           <section className="stats">
             <article className="stat card">
               <span className="stat-label">Всего за период</span>
@@ -274,7 +314,9 @@ export default function App() {
               <strong className="stat-value">{report.worklogCount}</strong>
             </article>
             <article className="stat card">
-              <span className="stat-label">Задач на доске</span>
+              <span className="stat-label">
+                {report.scope === "all" ? "Задач на доске" : "Ваших задач"}
+              </span>
               <strong className="stat-value">{report.board.issuesOnBoard}</strong>
             </article>
             <article className="stat card">
@@ -290,12 +332,12 @@ export default function App() {
                 report={report}
                 canEdit={writeAccess?.ok !== false}
                 writeAccessMessage={writeAccess?.message}
-                onRefresh={async () => {
-                  await load();
-                  if (configured) {
-                    fetchCheckWriteAccess().then(setWriteAccess).catch(() => undefined);
-                  }
-                }}
+                assigneeRefreshing={assigneeRefreshing}
+                onRefresh={handleTimesheetRefresh}
+                onRefreshAssignee={refreshAssignee}
+                onLoadEveryone={() => load(true)}
+                everyoneLoaded={report.scope === "all"}
+                everyoneLoading={loading && report.scope !== "all"}
               />
             </>
           ) : (
@@ -303,12 +345,12 @@ export default function App() {
               report={report}
               canEdit={writeAccess?.ok !== false}
               writeAccessMessage={writeAccess?.message}
-              onRefresh={async () => {
-                await load();
-                if (configured) {
-                  fetchCheckWriteAccess().then(setWriteAccess).catch(() => undefined);
-                }
-              }}
+              assigneeRefreshing={assigneeRefreshing}
+              onRefresh={handleTimesheetRefresh}
+              onRefreshAssignee={refreshAssignee}
+              onLoadEveryone={() => load(true)}
+              everyoneLoaded={report.scope === "all"}
+              everyoneLoading={loading && report.scope !== "all"}
             />
           )}
         </div>

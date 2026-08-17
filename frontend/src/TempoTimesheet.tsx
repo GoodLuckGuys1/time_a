@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { fetchSprintLoad, type TimeReport } from "./api";
+import { type TimeReport } from "./api";
 import { WorklogEditor } from "./WorklogEditor";
 import { AssigneeWorklogView } from "./AssigneeWorklogView";
 import { SprintLoadView } from "./SprintLoadView";
+import { EfficiencyView } from "./EfficiencyView";
 import {
   ALL_ASSIGNEES_ID,
   buildTimesheet,
@@ -21,34 +22,48 @@ interface TempoTimesheetProps {
   report: TimeReport;
   canEdit: boolean;
   writeAccessMessage?: string;
-  onRefresh: () => void;
+  assigneeRefreshing?: boolean;
+  onRefresh: () => void | Promise<void>;
+  onRefreshAssignee?: (assigneeId: string) => void | Promise<void>;
+  onLoadEveryone?: () => void | Promise<void>;
+  everyoneLoaded?: boolean;
+  everyoneLoading?: boolean;
 }
 
-type TimesheetTab = "timesheet" | "sprint" | "assignee";
+type TimesheetTab = "timesheet" | "sprint" | "assignee" | "efficiency";
 
-export function TempoTimesheet({ report, canEdit, writeAccessMessage, onRefresh }: TempoTimesheetProps) {
+export function TempoTimesheet({
+  report,
+  canEdit,
+  writeAccessMessage,
+  assigneeRefreshing = false,
+  onRefresh,
+  onRefreshAssignee,
+  onLoadEveryone,
+  everyoneLoaded = false,
+  everyoneLoading = false,
+}: TempoTimesheetProps) {
   const [activeTab, setActiveTab] = useState<TimesheetTab>("timesheet");
   const [groupBy, setGroupBy] = useState<GroupMode>("issue");
   const [selectedIssueAssignee, setSelectedIssueAssignee] = useState(ALL_ASSIGNEES_ID);
   const [activeCell, setActiveCell] = useState<TimesheetCell | null>(null);
 
-  useEffect(() => {
-    fetchSprintLoad(report.board.id).catch(() => {});
-  }, [report.board.id]);
-
   const issueAssignees = useMemo(() => listIssueAssignees(report), [report]);
 
   useEffect(() => {
     const cu = report.currentUser;
-    if (!cu) {
-      setSelectedIssueAssignee(ALL_ASSIGNEES_ID);
-      return;
-    }
-    const match = issueAssignees.find(
-      (a) => a.id === cu.id || (cu.login && a.id === cu.login) || a.name === cu.name,
-    );
-    setSelectedIssueAssignee(match?.id ?? cu.id);
-  }, [report.currentUser, issueAssignees]);
+    setSelectedIssueAssignee((prev) => {
+      if (prev === ALL_ASSIGNEES_ID && everyoneLoaded) return prev;
+      if (prev && prev !== ALL_ASSIGNEES_ID && issueAssignees.some((a) => a.id === prev)) {
+        return prev;
+      }
+      if (!cu) return ALL_ASSIGNEES_ID;
+      const match = issueAssignees.find(
+        (a) => a.id === cu.id || (cu.login && a.id === cu.login) || a.name === cu.name,
+      );
+      return match?.id ?? cu.id;
+    });
+  }, [report.currentUser, issueAssignees, everyoneLoaded]);
 
   const hasWriteAccess = canEdit;
   const issueFilterAllowsEdit = canEditIssueAssigneeFilter(
@@ -139,6 +154,15 @@ export function TempoTimesheet({ report, canEdit, writeAccessMessage, onRefresh 
             >
               Списания
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "efficiency"}
+              className={activeTab === "efficiency" ? "active" : ""}
+              onClick={() => setActiveTab("efficiency")}
+            >
+              Эффективность
+            </button>
           </div>
           {activeTab === "timesheet" && <span className="tempo-grand">{formatTotalMinutes(sheet.grandTotal)}</span>}
         </div>
@@ -151,9 +175,17 @@ export function TempoTimesheet({ report, canEdit, writeAccessMessage, onRefresh 
             <select
               className="assignee-select"
               value={selectedIssueAssignee}
-              onChange={(e) => setSelectedIssueAssignee(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value;
+                if (next === ALL_ASSIGNEES_ID && !everyoneLoaded && onLoadEveryone) {
+                  void onLoadEveryone();
+                }
+                setSelectedIssueAssignee(next);
+              }}
             >
-              <option value={ALL_ASSIGNEES_ID}>Все</option>
+              <option value={ALL_ASSIGNEES_ID}>
+                {everyoneLoaded ? "Все" : "Все (загрузить)"}
+              </option>
               {issueAssignees.map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name}
@@ -162,6 +194,28 @@ export function TempoTimesheet({ report, canEdit, writeAccessMessage, onRefresh 
               ))}
             </select>
           </label>
+          {!everyoneLoaded && onLoadEveryone && (
+            <button
+              type="button"
+              className="btn-secondary assignee-refresh-btn"
+              disabled={everyoneLoading}
+              title="Загрузить списания всех исполнителей по доске"
+              onClick={() => void onLoadEveryone()}
+            >
+              {everyoneLoading ? "Загрузка всех…" : "Загрузить всех"}
+            </button>
+          )}
+          {selectedIssueAssignee !== ALL_ASSIGNEES_ID && onRefreshAssignee && (
+            <button
+              type="button"
+              className="btn-secondary assignee-refresh-btn"
+              disabled={assigneeRefreshing}
+              title="Обновить списания только выбранного исполнителя"
+              onClick={() => onRefreshAssignee(selectedIssueAssignee)}
+            >
+              {assigneeRefreshing ? "Обновление…" : "Обновить исполнителя"}
+            </button>
+          )}
         </div>
       )}
 
@@ -169,6 +223,8 @@ export function TempoTimesheet({ report, canEdit, writeAccessMessage, onRefresh 
         <SprintLoadView boardId={report.board.id} />
       ) : activeTab === "assignee" ? (
         <AssigneeWorklogView boardId={report.board.id} periodFrom={report.period.from} periodTo={report.period.to} />
+      ) : activeTab === "efficiency" ? (
+        <EfficiencyView boardId={report.board.id} />
       ) : sheet.rows.length === 0 ? (
         <p className="sprint-empty">За выбранный период списаний нет.</p>
       ) : (
@@ -260,7 +316,17 @@ export function TempoTimesheet({ report, canEdit, writeAccessMessage, onRefresh 
           currentUser={report.currentUser}
           writeAccessMessage={writeAccessMessage}
           onClose={() => setActiveCell(null)}
-          onChanged={onRefresh}
+          onChanged={async () => {
+            if (
+              groupBy === "issue" &&
+              selectedIssueAssignee !== ALL_ASSIGNEES_ID &&
+              onRefreshAssignee
+            ) {
+              await onRefreshAssignee(selectedIssueAssignee);
+              return;
+            }
+            await onRefresh();
+          }}
         />
       )}
     </section>
