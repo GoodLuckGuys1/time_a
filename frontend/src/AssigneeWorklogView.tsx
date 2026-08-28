@@ -80,11 +80,10 @@ export function AssigneeWorklogView({ boardId, periodFrom, periodTo }: AssigneeW
       {(loading || everyoneLoading) && (
         <LoadingOverlay message={everyoneLoading ? "Загрузка всех исполнителей…" : "Загрузка списаний…"} />
       )}
-      <div className="assignee-worklog-toolbar">
-        <label className="assignee-select-label">
-          Исполнитель
+      <div className="filter-bar">
+        <label className="field">
+          <span>Исполнитель</span>
           <select
-            className="assignee-select"
             value={selectedId || data.selectedAssigneeId || ""}
             onChange={(e) => handleAssigneeChange(e.target.value)}
             disabled={loading || everyoneLoading}
@@ -95,28 +94,29 @@ export function AssigneeWorklogView({ boardId, periodFrom, periodTo }: AssigneeW
               data.assignees.map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name}
-                  {data.currentUser?.id === a.id ? " (вы)" : ""} — {a.totalFormatted} ({a.worklogCount})
+                  {data.currentUser?.id === a.id ? " · вы" : ""} — {a.totalFormatted}
                 </option>
               ))
             )}
           </select>
         </label>
-        {data.scope !== "all" && (
-          <button
-            type="button"
-            className="btn-secondary assignee-refresh-btn"
-            disabled={everyoneLoading || loading}
-            onClick={() => void loadEveryone()}
-          >
-            {everyoneLoading ? "Загрузка всех…" : "Загрузить всех"}
-          </button>
-        )}
+        <div className="filter-actions">
+          {data.scope !== "all" && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={everyoneLoading || loading}
+              onClick={() => void loadEveryone()}
+            >
+              {everyoneLoading ? "Загрузка…" : "Показать всех"}
+            </button>
+          )}
+        </div>
         {data.selectedAssigneeName && (
-          <span className="assignee-worklog-total">
-            Итого: <strong>{data.totalFormatted}</strong>
-            <span className="assignee-worklog-meta">
-              {" "}
-              · {data.worklogCount} записей · {data.tasks.length} задач
+          <span className="filter-total">
+            {data.totalFormatted}
+            <span className="filter-total-sub">
+              {data.worklogCount} зап. · {data.tasks.length} задач
             </span>
           </span>
         )}

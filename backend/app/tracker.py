@@ -845,9 +845,18 @@ class TrackerClient:
         async def one(key: str) -> list[dict[str, Any]]:
             async with sem:
                 try:
-                    return await self.get_issue_worklogs(client, key)
+                    entries = await self.get_issue_worklogs(client, key)
                 except TrackerError:
                     return []
+                stamped: list[dict[str, Any]] = []
+                for entry in entries:
+                    row = dict(entry)
+                    issue = row.get("issue")
+                    if not isinstance(issue, dict) or not issue.get("key"):
+                        base = issue if isinstance(issue, dict) else {}
+                        row["issue"] = {**base, "key": key}
+                    stamped.append(row)
+                return stamped
 
         chunks = await asyncio.gather(*(one(k) for k in issue_keys))
         merged: list[dict[str, Any]] = []
@@ -909,7 +918,7 @@ class TrackerClient:
     def _cached_sprint_skeleton(
         self, board_id: int, assignee_login: str | None
     ) -> dict[str, Any] | None:
-        cache_key = (board_id, "v8-sprint-me-first", assignee_login or "__all__")
+        cache_key = (board_id, "v9-sprint-late-added", assignee_login or "__all__")
         now = time.monotonic()
         cached = _sprint_load_cache.get(cache_key)
         if cached and now - cached[0] < _SPRINT_LOAD_CACHE_TTL_SEC:
@@ -919,7 +928,7 @@ class TrackerClient:
     async def _fetch_sprint_load_skeleton(
         self, board_id: int, *, assignee_login: str | None = None
     ) -> dict[str, Any]:
-        cache_key = (board_id, "v8-sprint-me-first", assignee_login or "__all__")
+        cache_key = (board_id, "v9-sprint-late-added", assignee_login or "__all__")
         now = time.monotonic()
         async with _tracker_cache_lock:
             cached = _sprint_load_cache.get(cache_key)
@@ -927,7 +936,8 @@ class TrackerClient:
                 return copy.deepcopy(cached[1])
 
         sprint_fields = (
-            "sprint,assignee,originalEstimation,estimation,summary,status,components,tags,queue"
+            "sprint,assignee,originalEstimation,estimation,summary,status,"
+            "components,tags,queue,createdAt"
         )
         name_prefix = self._settings.sprint_tag_prefix
         async with httpx.AsyncClient(timeout=180.0) as client:
@@ -1627,6 +1637,15 @@ def _sprint_period_from_api(sprint: dict[str, Any]) -> tuple[date, date] | None:
     return None
 
 
+def _worklog_entry_issue_key(entry: dict[str, Any]) -> str | None:
+    key = _issue_key(entry.get("issue") or {})
+    if key:
+        return key
+    self_url = str(entry.get("self") or "")
+    match = re.search(r"/issues/([^/]+)/worklog", self_url)
+    return match.group(1) if match else None
+
+
 def _worklog_minutes_for_issue(
     worklogs: list[dict[str, Any]],
     issue_key: str,
@@ -1635,7 +1654,7 @@ def _worklog_minutes_for_issue(
 ) -> int:
     total = 0
     for entry in worklogs:
-        if _issue_key(entry.get("issue") or {}) != issue_key:
+        if _worklog_entry_issue_key(entry) != issue_key:
             continue
         day = _worklog_day(entry)
         if not day or day < date_from or day > date_to:
@@ -1644,6 +1663,18 @@ def _worklog_minutes_for_issue(
         if duration > timedelta(0):
             total += int(duration.total_seconds() // 60)
     return total
+
+
+def _issue_created_date(issue: dict[str, Any]) -> date | None:
+    raw = issue.get("createdAt")
+    if not raw or not isinstance(raw, str):
+        return None
+    dt = _parse_tracker_datetime(raw)
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(REPORT_TZ).date()
 
 
 def _agile_sprint_groups_for_issue(
@@ -1705,6 +1736,7 @@ def _build_assignee_buckets(
     issues: list[dict[str, Any]],
     *,
     spent_by_issue: dict[str, int] | None = None,
+    sprint_start: date | None = None,
 ) -> tuple[list[dict[str, Any]], int, int, int, int]:
     by_assignee: dict[str, dict[str, Any]] = {}
     issues_without_estimate = 0
@@ -1743,6 +1775,8 @@ def _build_assignee_buckets(
             by_assignee[assignee_id] = bucket
 
         status = (issue.get("status") or {}).get("display") or (issue.get("status") or {}).get("key")
+        created = _issue_created_date(issue)
+        late_added = bool(sprint_start and created and created > sprint_start)
         bucket["issues"].append(
             {
                 "issueKey": key,
@@ -1756,6 +1790,8 @@ def _build_assignee_buckets(
                 "spentMinutes": spent,
                 "spentFormatted": format_duration(timedelta(minutes=spent)) if spent else "—",
                 "status": status or "",
+                "createdAt": created.isoformat() if created else None,
+                "lateAdded": late_added,
             }
         )
         bucket["issueCount"] += 1
@@ -1836,6 +1872,7 @@ def _aggregate_sprint_load_by_agile(
         assignees, issues_without_estimate, total_planned, total_original, total_spent = _build_assignee_buckets(
             meta["issues"],
             spent_by_issue=spent_by_issue,
+            sprint_start=period[0] if period else None,
         )
         group = {
             "label": meta["label"],

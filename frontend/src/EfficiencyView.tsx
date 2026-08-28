@@ -160,6 +160,30 @@ export function EfficiencyView({ boardId }: EfficiencyViewProps) {
     };
   }, [boardId]);
 
+  useEffect(() => {
+    if (!skeleton || !selectedAssignee) return;
+    if (spentCache[selectedAssignee]) return;
+    let cancelled = false;
+    setAssigneeRefreshing(true);
+    setError(null);
+    fetchSprintLoad(boardId, selectedAssignee)
+      .then((report) => {
+        if (cancelled) return;
+        setSpentCache((prev) => ({ ...prev, [selectedAssignee]: report }));
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : "Не удалось загрузить списания");
+      })
+      .finally(() => {
+        if (!cancelled) setAssigneeRefreshing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boardId, skeleton, selectedAssignee]);
+
   const data = useMemo(() => {
     if (!skeleton) return null;
     return spentCache[selectedAssignee] ?? skeleton;
@@ -173,6 +197,7 @@ export function EfficiencyView({ boardId }: EfficiencyViewProps) {
     try {
       const report = await fetchSprintLoad(boardId, "__all__");
       setSkeleton(report);
+      setSpentCache({});
       const groups = report.groups ?? [];
       setSelectedSprint((prev) => prev || pickDefaultSprint(groups, report.activeLabel));
     } catch (e) {
@@ -309,82 +334,67 @@ export function EfficiencyView({ boardId }: EfficiencyViewProps) {
         spentLoaded={spentLoaded}
         onLoadEveryone={loadEveryone}
         everyoneLoading={everyoneLoading}
+        extra={
+          <>
+            <label className="field">
+              <span>Спринт</span>
+              <select
+                value={groupKey(activeGroup)}
+                onChange={(e) => {
+                  setSelectedSprint(e.target.value);
+                  setExpanded(null);
+                }}
+              >
+                {groups.map((g) => (
+                  <option key={groupKey(g)} value={groupKey(g)}>
+                    {g.label}
+                    {g.label === data.activeLabel ? " · текущий" : ""}
+                    {!g.showSpent ? " · нет дат" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {teamOptions.length > 0 && (
+              <label className="field">
+                <span>Команда</span>
+                <select
+                  value={selectedTeam}
+                  onChange={(e) => {
+                    setSelectedTeam(e.target.value);
+                    setExpanded(null);
+                  }}
+                >
+                  <option value={ALL_TEAMS_ID}>Все команды</option>
+                  {teamOptions.map((team) => (
+                    <option key={team} value={team}>
+                      {team}
+                    </option>
+                  ))}
+                  <option value={NO_TEAM_LABEL}>{NO_TEAM_LABEL}</option>
+                </select>
+              </label>
+            )}
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={closedOnly}
+                onChange={(e) => {
+                  setClosedOnly(e.target.checked);
+                  setExpanded(null);
+                }}
+              />
+              Только закрытые
+            </label>
+          </>
+        }
       />
 
       {!spentLoaded && (
-        <p className="sprint-hint sprint-hint-top">
-          Для расчёта факта выберите исполнителя и нажмите «Загрузить списания».
-          {skeleton.scope !== "all"
-            ? " Сейчас показаны только ваши задачи — «Загрузить всех исполнителей» подтянет остальных."
-            : ""}
-        </p>
+        <p className="inline-hint">Подтягиваем списания за даты спринта…</p>
       )}
-
-      <div className="assignee-worklog-toolbar efficiency-toolbar">
-        <label className="assignee-select-label">
-          Спринт
-          <select
-            className="assignee-select"
-            value={groupKey(activeGroup)}
-            onChange={(e) => {
-              setSelectedSprint(e.target.value);
-              setExpanded(null);
-            }}
-          >
-            {groups.map((g) => (
-              <option key={groupKey(g)} value={groupKey(g)}>
-                {g.label}
-                {g.label === data.activeLabel ? " (текущий)" : ""}
-                {!g.showSpent ? " — нет дат" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-        {teamOptions.length > 0 && (
-          <label className="assignee-select-label">
-            Команда
-            <select
-              className="assignee-select"
-              value={selectedTeam}
-              onChange={(e) => {
-                setSelectedTeam(e.target.value);
-                setExpanded(null);
-              }}
-            >
-              <option value={ALL_TEAMS_ID}>Все команды</option>
-              {teamOptions.map((team) => (
-                <option key={team} value={team}>
-                  {team}
-                </option>
-              ))}
-              <option value={NO_TEAM_LABEL}>{NO_TEAM_LABEL}</option>
-            </select>
-          </label>
-        )}
-        <label className="efficiency-check">
-          <input
-            type="checkbox"
-            checked={closedOnly}
-            onChange={(e) => {
-              setClosedOnly(e.target.checked);
-              setExpanded(null);
-            }}
-          />
-          Только закрытые задачи
-        </label>
-      </div>
 
       {!activeGroup.showSpent && (
-        <p className="sprint-hint sprint-hint-top">
-          У спринта нет дат в Tracker — списанное время за период спринта недоступно. Показаны
-          оценки задач; факт будет «—», пока у спринта не появятся start/end.
-        </p>
-      )}
-      {activeGroup.showSpent && !spentLoaded && (
-        <p className="sprint-hint sprint-hint-top">
-          Показаны оценки выбранного исполнителя. Нажмите «Загрузить списания», чтобы подтянуть
-          факт из worklog.
-        </p>
+        <p className="inline-hint">У спринта нет дат в Tracker — факт за период недоступен.</p>
       )}
 
       <div className="efficiency-summary">
@@ -508,7 +518,15 @@ export function EfficiencyView({ boardId }: EfficiencyViewProps) {
                       </tr>
                       {open &&
                         person.issues.map((row) => (
-                          <tr key={`${rowId}-${row.issue.issueKey}`} className="sprint-issue-row">
+                          <tr
+                            key={`${rowId}-${row.issue.issueKey}`}
+                            className={`sprint-issue-row${row.issue.lateAdded ? " sprint-issue-late" : ""}`}
+                            title={
+                              row.issue.lateAdded
+                                ? "Влетела в спринт: создана после старта спринта"
+                                : undefined
+                            }
+                          >
                             <td colSpan={2} className="sprint-issue-cell">
                               <a
                                 href={row.issue.issueUrl}
@@ -522,6 +540,9 @@ export function EfficiencyView({ boardId }: EfficiencyViewProps) {
                               <span className="tempo-row-sub" title={row.issue.issueTitle}>
                                 {row.issue.issueTitle}
                               </span>
+                              {row.issue.lateAdded && (
+                                <span className="sprint-issue-late-badge">влетела</span>
+                              )}
                               {row.issue.status && (
                                 <span className="sprint-issue-status">{row.issue.status}</span>
                               )}
@@ -578,9 +599,8 @@ export function EfficiencyView({ boardId }: EfficiencyViewProps) {
       )}
 
       <p className="sprint-hint">
-        Запланировано — «Первоначальная оценка» (если пусто — текущий остаток). Списано — сумма
-        worklog по задаче за даты спринта. Команды — компонент/тег «Команда-N» с доски Tracker.
-        Факт / план = списано ÷ план × 100% (&gt;100% — перерасход).
+        План — первоначальная оценка. Факт / план = списано ÷ план × 100%. Жёлтым — задачи,
+        созданные после старта спринта (влетели).
       </p>
     </div>
   );

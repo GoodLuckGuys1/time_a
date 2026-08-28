@@ -30,6 +30,12 @@ function defaultRange() {
   };
 }
 
+function shiftDays(iso: string, days: number): string {
+  const d = new Date(`${iso}T12:00:00`);
+  d.setDate(d.getDate() + days);
+  return localDateString(d);
+}
+
 export default function App() {
   const initial = useMemo(defaultRange, []);
   const [from, setFrom] = useState(initial.from);
@@ -119,19 +125,112 @@ export default function App() {
     }
   };
 
+  const setPreset = (days: number) => {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - (days - 1));
+    setFrom(localDateString(start));
+    setTo(localDateString(end));
+  };
+
+  const boardName = report?.board.name || (report ? `Доска ${report.board.id}` : cfg?.boardId ? `Доска ${cfg.boardId}` : null);
+
   return (
     <div className="app">
-      <header className="hero">
-        <div>
-          <p className="eyebrow">Yandex Tracker · доска 288</p>
+      <header className="app-header">
+        <div className="app-brand">
+          <span className="app-mark" aria-hidden>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.8" />
+              <path d="M12 7v5.2l3.2 1.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </span>
           <h1>Учёт времени</h1>
-          <p className="subtitle">Сетка Timesheet в стиле Tempo — задачи × дни.</p>
+          {report?.board ? (
+            <a className="app-board" href={report.board.url} target="_blank" rel="noreferrer">
+              {boardName}
+            </a>
+          ) : (
+            <span className="app-board muted">{boardName || "Tracker"}</span>
+          )}
         </div>
-        {report?.board && (
-          <a className="board-link" href={report.board.url} target="_blank" rel="noreferrer">
-            {report.board.name || `Доска ${report.board.id}`}
-          </a>
+
+        {report && (
+          <div className="app-metrics" aria-label="Сводка за период">
+            <span>
+              <strong>{report.totalFormatted || "0h"}</strong> списано
+            </span>
+            <span>
+              <strong>{report.worklogCount}</strong> зап.
+            </span>
+            <span>
+              <strong>{report.board.issuesOnBoard}</strong> задач
+            </span>
+            <span className={`scope-chip${report.scope === "all" ? " is-all" : ""}`}>
+              {report.scope === "all" ? "Все" : "Вы"}
+            </span>
+          </div>
         )}
+
+        <div className="app-period">
+          <div className="period-presets" role="group" aria-label="Быстрый период">
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPreset(1)}>
+              День
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPreset(7)}>
+              Нед.
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPreset(30)}>
+              30д
+            </button>
+          </div>
+          <input
+            type="date"
+            aria-label="С"
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+          />
+          <span className="period-dash">–</span>
+          <input
+            type="date"
+            aria-label="По"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+          />
+          <div className="period-step">
+            <button
+              type="button"
+              className="btn btn-ghost btn-icon"
+              title="На неделю назад"
+              onClick={() => {
+                setFrom(shiftDays(from, -7));
+                setTo(shiftDays(to, -7));
+              }}
+            >
+              ‹
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-icon"
+              title="На неделю вперёд"
+              onClick={() => {
+                setFrom(shiftDays(from, 7));
+                setTo(shiftDays(to, 7));
+              }}
+            >
+              ›
+            </button>
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={() => load(report?.scope === "all")}
+            disabled={loading || !configured}
+          >
+            {loading && <LoadingSpinner size="sm" label="Загрузка" />}
+            {loading ? "…" : "Обновить"}
+          </button>
+        </div>
       </header>
 
       {configured === false && cfg && (
@@ -208,7 +307,7 @@ export default function App() {
                   <option value="X-Cloud-Org-ID">X-Cloud-Org-ID</option>
                 </select>
               </label>
-              <button type="button" onClick={checkOrg}>
+              <button type="button" className="btn btn-secondary" onClick={checkOrg}>
                 Проверить
               </button>
               {orgTestMsg && <p className="org-test-msg">{orgTestMsg}</p>}
@@ -217,38 +316,11 @@ export default function App() {
         </section>
       )}
 
-      <section className="controls card">
-        <label>
-          С
-          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-        </label>
-        <label>
-          По
-          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
-        </label>
-        <button
-          type="button"
-          className="btn-secondary"
-          title="Показать только сегодняшний день"
-          onClick={() => {
-            const t = localDateString();
-            setFrom(t);
-            setTo(t);
-          }}
-        >
-          Сегодня
-        </button>
-        <button type="button" className={loading ? "btn-loading" : undefined} onClick={load} disabled={loading || !configured}>
-          {loading && <LoadingSpinner size="sm" label="Загрузка" />}
-          {loading ? "Загрузка…" : "Обновить"}
-        </button>
-      </section>
-
       {configured === null && <LoadingPanel message="Проверка настроек…" />}
 
       {error && (
         <section className="banner banner-error">
-          <strong>Ошибка</strong>
+          <strong>Не удалось загрузить данные</strong>
           <pre className="error-text">{error}</pre>
         </section>
       )}
@@ -258,101 +330,32 @@ export default function App() {
       )}
 
       {configured && writeAccess && !writeAccess.ok && (
-        <section className="banner banner-warn">
-          <strong>Токен без права записи (tracker:write)</strong>
-          <p>
-            Текущий токен выдан только с <code>tracker:read</code>. Смена строки в .env не меняет права
-            уже выданного токена.
-          </p>
-          <ol>
-            <li>
-              Откройте приложение OAuth:{" "}
-              {cfg?.oauthAppInfoUrl ? (
-                <a href={cfg.oauthAppInfoUrl} target="_blank" rel="noreferrer">
-                  настройки приложения
-                </a>
-              ) : (
-                <a href="https://oauth.yandex.ru/" target="_blank" rel="noreferrer">
-                  oauth.yandex.ru
-                </a>
-              )}{" "}
-              → добавьте право <strong>«Запись в трекер»</strong> (<code>tracker:write</code>) → сохраните.
-            </li>
-            <li>
-              Получите <strong>новый</strong> токен:{" "}
-              <a href={cfg?.oauthStartUrl ?? "/oauth/start"} target="_blank" rel="noreferrer">
-                /oauth/start
-              </a>{" "}
-              (на экране должны быть оба права; в ответе — <code>tracker:write</code> в scope).
-            </li>
-            <li>
-              Вставьте токен в <code>TRACKER_OAUTH_TOKEN</code> в .env и перезапустите backend.
-            </li>
-          </ol>
-          {writeAccess.message && <pre className="error-text">{writeAccess.message}</pre>}
-        </section>
+        <p className="banner banner-warn banner-compact">
+          Только просмотр — нужен <code>tracker:write</code>.{" "}
+          <a href={cfg?.oauthStartUrl ?? "/oauth/start"} target="_blank" rel="noreferrer">
+            Новый токен
+          </a>
+        </p>
       )}
 
       {report && (
-        <div className="loading-host">
+        <div className="loading-host workspace">
           {(loading || assigneeRefreshing) && (
             <LoadingOverlay
-              message={
-                assigneeRefreshing
-                  ? "Обновление исполнителя…"
-                  : "Обновление данных…"
-              }
+              message={assigneeRefreshing ? "Обновление исполнителя…" : "Обновление данных…"}
             />
           )}
-          <section className="stats">
-            <article className="stat card">
-              <span className="stat-label">Всего за период</span>
-              <strong className="stat-value">{report.totalFormatted}</strong>
-            </article>
-            <article className="stat card">
-              <span className="stat-label">Записей</span>
-              <strong className="stat-value">{report.worklogCount}</strong>
-            </article>
-            <article className="stat card">
-              <span className="stat-label">
-                {report.scope === "all" ? "Задач на доске" : "Ваших задач"}
-              </span>
-              <strong className="stat-value">{report.board.issuesOnBoard}</strong>
-            </article>
-            <article className="stat card">
-              <span className="stat-label">Дней с работой</span>
-              <strong className="stat-value">{report.days.length}</strong>
-            </article>
-          </section>
-
-          {report.days.length === 0 ? (
-            <>
-              <p className="empty card">За период списаний не найдено.</p>
-              <TempoTimesheet
-                report={report}
-                canEdit={writeAccess?.ok !== false}
-                writeAccessMessage={writeAccess?.message}
-                assigneeRefreshing={assigneeRefreshing}
-                onRefresh={handleTimesheetRefresh}
-                onRefreshAssignee={refreshAssignee}
-                onLoadEveryone={() => load(true)}
-                everyoneLoaded={report.scope === "all"}
-                everyoneLoading={loading && report.scope !== "all"}
-              />
-            </>
-          ) : (
-            <TempoTimesheet
-              report={report}
-              canEdit={writeAccess?.ok !== false}
-              writeAccessMessage={writeAccess?.message}
-              assigneeRefreshing={assigneeRefreshing}
-              onRefresh={handleTimesheetRefresh}
-              onRefreshAssignee={refreshAssignee}
-              onLoadEveryone={() => load(true)}
-              everyoneLoaded={report.scope === "all"}
-              everyoneLoading={loading && report.scope !== "all"}
-            />
-          )}
+          <TempoTimesheet
+            report={report}
+            canEdit={writeAccess?.ok !== false}
+            writeAccessMessage={writeAccess?.message}
+            assigneeRefreshing={assigneeRefreshing}
+            onRefresh={handleTimesheetRefresh}
+            onRefreshAssignee={refreshAssignee}
+            onLoadEveryone={() => load(true)}
+            everyoneLoaded={report.scope === "all"}
+            everyoneLoading={loading && report.scope !== "all"}
+          />
         </div>
       )}
     </div>

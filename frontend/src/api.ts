@@ -122,6 +122,8 @@ export interface SprintLoadIssue {
   spentMinutes: number;
   spentFormatted: string;
   status: string;
+  createdAt?: string | null;
+  lateAdded?: boolean;
 }
 
 export interface SprintLoadAssignee {

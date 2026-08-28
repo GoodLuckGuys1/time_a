@@ -90,7 +90,15 @@ function AssigneeTable({
               </tr>
               {open &&
                 row.issues.map((issue) => (
-                  <tr key={`${rowKey}-${issue.issueKey}`} className="sprint-issue-row">
+                  <tr
+                    key={`${rowKey}-${issue.issueKey}`}
+                    className={`sprint-issue-row${issue.lateAdded ? " sprint-issue-late" : ""}`}
+                    title={
+                      issue.lateAdded
+                        ? "Влетела в спринт: создана после старта спринта"
+                        : undefined
+                    }
+                  >
                     <td colSpan={2} className="sprint-issue-cell">
                       <a
                         href={issue.issueUrl}
@@ -104,6 +112,7 @@ function AssigneeTable({
                       <span className="tempo-row-sub" title={issue.issueTitle}>
                         {issue.issueTitle}
                       </span>
+                      {issue.lateAdded && <span className="sprint-issue-late-badge">влетела</span>}
                       {issue.status && <span className="sprint-issue-status">{issue.status}</span>}
                     </td>
                     <td className="sprint-num sprint-original">
@@ -200,6 +209,31 @@ export function SprintLoadView({ boardId }: SprintLoadViewProps) {
     };
   }, [boardId]);
 
+  useEffect(() => {
+    if (!skeleton || !selectedAssignee) return;
+    if (spentCache[selectedAssignee]) return;
+    let cancelled = false;
+    setAssigneeRefreshing(true);
+    setError(null);
+    fetchSprintLoad(boardId, selectedAssignee)
+      .then((report) => {
+        if (cancelled) return;
+        setSpentCache((prev) => ({ ...prev, [selectedAssignee]: report }));
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : "Не удалось загрузить списания");
+      })
+      .finally(() => {
+        if (!cancelled) setAssigneeRefreshing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // spentCache intentionally omitted: only auto-load when missing for this assignee
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boardId, skeleton, selectedAssignee]);
+
   const data = useMemo(() => {
     if (!skeleton) return null;
     return spentCache[selectedAssignee] ?? skeleton;
@@ -214,6 +248,7 @@ export function SprintLoadView({ boardId }: SprintLoadViewProps) {
     try {
       const report = await fetchSprintLoad(boardId, "__all__");
       setSkeleton(report);
+      setSpentCache({});
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось загрузить всех исполнителей");
     } finally {
@@ -294,35 +329,31 @@ export function SprintLoadView({ boardId }: SprintLoadViewProps) {
         spentLoaded={spentLoaded}
         onLoadEveryone={loadEveryone}
         everyoneLoading={everyoneLoading}
+        extra={
+          teamOptions.length > 0 ? (
+            <label className="field">
+              <span>Команда</span>
+              <select
+                value={selectedTeam}
+                onChange={(e) => {
+                  setSelectedTeam(e.target.value);
+                  setExpanded(null);
+                }}
+              >
+                <option value={ALL_TEAMS_ID}>Все команды</option>
+                {teamOptions.map((team) => (
+                  <option key={team} value={team}>
+                    {team}
+                  </option>
+                ))}
+                <option value={NO_TEAM_LABEL}>{NO_TEAM_LABEL}</option>
+              </select>
+            </label>
+          ) : null
+        }
       />
-      {teamOptions.length > 0 && (
-        <div className="assignee-worklog-toolbar">
-          <label className="assignee-select-label">
-            Команда
-            <select
-              className="assignee-select"
-              value={selectedTeam}
-              onChange={(e) => {
-                setSelectedTeam(e.target.value);
-                setExpanded(null);
-              }}
-            >
-              <option value={ALL_TEAMS_ID}>Все команды</option>
-              {teamOptions.map((team) => (
-                <option key={team} value={team}>
-                  {team}
-                </option>
-              ))}
-              <option value={NO_TEAM_LABEL}>{NO_TEAM_LABEL}</option>
-            </select>
-          </label>
-        </div>
-      )}
       {!spentLoaded && (
-        <p className="sprint-hint sprint-hint-top">
-          Оценки загружены {skeleton.scope === "all" ? "по всем исполнителям" : "только по вам"}.
-          Списания — для выбранного исполнителя: нажмите «Загрузить списания».
-        </p>
+        <p className="inline-hint">Подтягиваем списания за даты спринта…</p>
       )}
       <div className="sprint-head">
         <div>
@@ -409,13 +440,8 @@ export function SprintLoadView({ boardId }: SprintLoadViewProps) {
       })}
 
       <p className="sprint-hint">
-        Перв. оценка — «Первоначальная оценка»; остаток — поле «Оценка» в Tracker (сколько ещё
-        осталось). Команды — компонент/тег «Команда-N» (тот же фильтр, что на доске Tracker).
-        {data.showSpentColumn
-          ? spentLoaded
-            ? " Списано в спринте — сумма списаний по задаче за даты спринта (только выбранный исполнитель)."
-            : " Колонка «Списано» заполнится после «Загрузить списания» для выбранного исполнителя."
-          : " Списания за спринт недоступны (нет дат спринта в Tracker)."}
+        Перв. оценка — первоначальная; остаток — поле «Оценка» в Tracker. Команды — компонент
+        «Команда-N». Жёлтым — задачи, созданные после старта спринта (влетели).
       </p>
     </div>
   );

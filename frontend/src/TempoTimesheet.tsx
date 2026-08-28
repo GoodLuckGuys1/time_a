@@ -103,119 +103,113 @@ export function TempoTimesheet({
   };
 
   return (
-    <section className="tempo-wrap card">
-      <div className="tempo-toolbar">
-        <div className="tempo-toolbar-left">
-          <h2 className="tempo-title">Timesheet</h2>
-          <span className="tempo-period">{report.period.from} — {report.period.to}</span>
-          {hasWriteAccess && <span className="tempo-edit-hint">Клик по ячейке — редактирование</span>}
-        </div>
-        <div className="tempo-toolbar-right">
-          <div className="tempo-tabs" role="tablist">
+    <section className="workspace-card">
+      <nav className="workspace-nav" role="tablist" aria-label="Разделы">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "timesheet"}
+          className={activeTab === "timesheet" ? "active" : ""}
+          onClick={() => setActiveTab("timesheet")}
+        >
+          Табель
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "sprint"}
+          className={activeTab === "sprint" ? "active" : ""}
+          onClick={() => setActiveTab("sprint")}
+        >
+          Спринт
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "assignee"}
+          className={activeTab === "assignee" ? "active" : ""}
+          onClick={() => setActiveTab("assignee")}
+        >
+          Списания
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "efficiency"}
+          className={activeTab === "efficiency" ? "active" : ""}
+          onClick={() => setActiveTab("efficiency")}
+        >
+          Эффективность
+        </button>
+      </nav>
+
+      {activeTab === "timesheet" && (
+        <div className="filter-bar">
+          <div className="segment" role="group" aria-label="Группировка">
             <button
               type="button"
-              role="tab"
-              aria-selected={activeTab === "timesheet" && groupBy === "issue"}
-              className={activeTab === "timesheet" && groupBy === "issue" ? "active" : ""}
-              onClick={() => {
-                setActiveTab("timesheet");
-                setGroupBy("issue");
-              }}
+              className={groupBy === "issue" ? "active" : ""}
+              onClick={() => setGroupBy("issue")}
             >
-              По задачам
+              Задачи
             </button>
             <button
               type="button"
-              role="tab"
-              aria-selected={activeTab === "timesheet" && groupBy === "user"}
-              className={activeTab === "timesheet" && groupBy === "user" ? "active" : ""}
-              onClick={() => {
-                setActiveTab("timesheet");
-                setGroupBy("user");
-              }}
+              className={groupBy === "user" ? "active" : ""}
+              onClick={() => setGroupBy("user")}
             >
-              По исполнителям
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === "sprint"}
-              className={activeTab === "sprint" ? "active" : ""}
-              onClick={() => setActiveTab("sprint")}
-            >
-              Спринт
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === "assignee"}
-              className={activeTab === "assignee" ? "active" : ""}
-              onClick={() => setActiveTab("assignee")}
-            >
-              Списания
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === "efficiency"}
-              className={activeTab === "efficiency" ? "active" : ""}
-              onClick={() => setActiveTab("efficiency")}
-            >
-              Эффективность
+              Люди
             </button>
           </div>
-          {activeTab === "timesheet" && <span className="tempo-grand">{formatTotalMinutes(sheet.grandTotal)}</span>}
-        </div>
-      </div>
-
-      {activeTab === "timesheet" && groupBy === "issue" && (
-        <div className="assignee-worklog-toolbar">
-          <label className="assignee-select-label">
-            Исполнитель:
-            <select
-              className="assignee-select"
-              value={selectedIssueAssignee}
-              onChange={(e) => {
-                const next = e.target.value;
-                if (next === ALL_ASSIGNEES_ID && !everyoneLoaded && onLoadEveryone) {
-                  void onLoadEveryone();
-                }
-                setSelectedIssueAssignee(next);
-              }}
-            >
-              <option value={ALL_ASSIGNEES_ID}>
-                {everyoneLoaded ? "Все" : "Все (загрузить)"}
-              </option>
-              {issueAssignees.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                  {report.currentUser?.id === a.id ? " (вы)" : ""}
+          {groupBy === "issue" && (
+            <label className="field">
+              <span>Исполнитель</span>
+              <select
+                value={selectedIssueAssignee}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  if (next === ALL_ASSIGNEES_ID && !everyoneLoaded && onLoadEveryone) {
+                    void onLoadEveryone();
+                  }
+                  setSelectedIssueAssignee(next);
+                }}
+              >
+                <option value={ALL_ASSIGNEES_ID}>
+                  {everyoneLoaded ? "Все" : "Все (загрузить)"}
                 </option>
-              ))}
-            </select>
-          </label>
-          {!everyoneLoaded && onLoadEveryone && (
-            <button
-              type="button"
-              className="btn-secondary assignee-refresh-btn"
-              disabled={everyoneLoading}
-              title="Загрузить списания всех исполнителей по доске"
-              onClick={() => void onLoadEveryone()}
-            >
-              {everyoneLoading ? "Загрузка всех…" : "Загрузить всех"}
-            </button>
+                {issueAssignees.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                    {report.currentUser?.id === a.id ? " · вы" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
           )}
-          {selectedIssueAssignee !== ALL_ASSIGNEES_ID && onRefreshAssignee && (
-            <button
-              type="button"
-              className="btn-secondary assignee-refresh-btn"
-              disabled={assigneeRefreshing}
-              title="Обновить списания только выбранного исполнителя"
-              onClick={() => onRefreshAssignee(selectedIssueAssignee)}
-            >
-              {assigneeRefreshing ? "Обновление…" : "Обновить исполнителя"}
-            </button>
-          )}
+          <div className="filter-actions">
+            {!everyoneLoaded && onLoadEveryone && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={everyoneLoading}
+                title="Подтянуть списания остальных по доске"
+                onClick={() => void onLoadEveryone()}
+              >
+                {everyoneLoading ? "Загрузка…" : "Показать всех"}
+              </button>
+            )}
+            {groupBy === "issue" && selectedIssueAssignee !== ALL_ASSIGNEES_ID && onRefreshAssignee && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={assigneeRefreshing}
+                onClick={() => onRefreshAssignee(selectedIssueAssignee)}
+              >
+                {assigneeRefreshing ? "Обновление…" : "Обновить"}
+              </button>
+            )}
+          </div>
+          <span className="filter-total">{formatTotalMinutes(sheet.grandTotal)}</span>
         </div>
       )}
 
@@ -226,7 +220,10 @@ export function TempoTimesheet({
       ) : activeTab === "efficiency" ? (
         <EfficiencyView boardId={report.board.id} />
       ) : sheet.rows.length === 0 ? (
-        <p className="sprint-empty">За выбранный период списаний нет.</p>
+        <div className="empty-state">
+          <p>За этот период списаний нет</p>
+          <span>Выберите другие даты или нажмите «Показать всех».</span>
+        </div>
       ) : (
         <div className="tempo-scroll">
           <table className="tempo-grid">
@@ -282,7 +279,7 @@ export function TempoTimesheet({
                         }
                         role={clickable ? "button" : undefined}
                         tabIndex={clickable ? 0 : undefined}
-                        title={clickable ? "Редактировать списания" : undefined}
+                        title={clickable ? (hasWriteAccess ? "Изменить списание" : "Открыть списания") : undefined}
                       >
                         {formatCellMinutes(minutes)}
                       </td>
@@ -294,7 +291,7 @@ export function TempoTimesheet({
             </tbody>
             <tfoot>
               <tr className="tempo-foot">
-                <td className="tempo-sticky tempo-foot-label">Итого за день</td>
+                <td className="tempo-sticky tempo-foot-label">Итого</td>
                 {sheet.dates.map((d) => (
                   <td key={d} className={`tempo-foot-cell${isWeekend(d) ? " tempo-weekend" : ""}`}>
                     {formatCellMinutes(sheet.colTotals[d] ?? 0)}
