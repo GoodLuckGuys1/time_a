@@ -70,7 +70,7 @@ async def config_status() -> dict:
     }
 
 
-async def _resolve_assignee_ref(assignee: str | None) -> str | None:
+async def _resolve_assignee_ref(assignee: Optional[str]) -> Optional[str]:
     if not assignee or not assignee.strip():
         return assignee
     raw = assignee.strip()
