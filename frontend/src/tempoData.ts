@@ -1,4 +1,4 @@
-import type { DayRow, TaskRow, TimeReport } from "./api";
+import type { DayRow, ExtraAssigneeOption, TaskRow, TimeReport } from "./api";
 
 export type GroupMode = "issue" | "user";
 export const ALL_ASSIGNEES_ID = "__all__";
@@ -241,16 +241,56 @@ export function canEditIssueAssigneeFilter(
   return false;
 }
 
+function assigneeAliasIds(
+  selectedId: string,
+  assignees: IssueAssigneeOption[],
+  extraAssignees?: ExtraAssigneeOption[],
+): Set<string> {
+  const ids = new Set<string>([selectedId]);
+  const picked = assignees.find((a) => a.id === selectedId);
+  if (picked) ids.add(picked.id);
+  const extra = extraAssignees?.find(
+    (row) => row.id === selectedId || row.login === selectedId || row.uid === selectedId,
+  );
+  if (extra) {
+    ids.add(extra.id);
+    if (extra.login) ids.add(extra.login);
+    if (extra.uid) ids.add(extra.uid);
+  }
+  return ids;
+}
+
 function entryMatchesAssignee(
   entry: { authorKey?: string; authorLogin?: string; author?: string },
   selectedId: string,
   assignees: IssueAssigneeOption[],
+  extraAssignees?: ExtraAssigneeOption[],
 ): boolean {
   if (selectedId === ALL_ASSIGNEES_ID) return true;
+  const aliases = assigneeAliasIds(selectedId, assignees, extraAssignees);
   const entryId = issueEntryAuthorId(entry);
-  if (entryId === selectedId) return true;
+  if (aliases.has(entryId)) return true;
+  if (entry.authorKey && aliases.has(entry.authorKey)) return true;
+  if (entry.authorLogin && aliases.has(entry.authorLogin)) return true;
   const picked = assignees.find((a) => a.id === selectedId);
   if (picked && entry.author?.trim() === picked.name.trim()) return true;
+  return false;
+}
+
+export function hasAssigneeInReport(
+  report: TimeReport,
+  assigneeId: string,
+  assignees: IssueAssigneeOption[],
+): boolean {
+  for (const day of report.days) {
+    for (const task of day.tasks) {
+      for (const entry of task.entries) {
+        if (entryMatchesAssignee(entry, assigneeId, assignees, report.extraAssignees)) {
+          return true;
+        }
+      }
+    }
+  }
   return false;
 }
 
@@ -266,13 +306,16 @@ function stripAssigneeFromDays(
   days: DayRow[],
   assigneeId: string,
   assignees: IssueAssigneeOption[],
+  extraAssignees?: ExtraAssigneeOption[],
 ): DayRow[] {
   const result: DayRow[] = [];
   for (const day of days) {
     const tasks: TaskRow[] = [];
     let dayMinutes = 0;
     for (const task of day.tasks) {
-      const kept = task.entries.filter((e) => !entryMatchesAssignee(e, assigneeId, assignees));
+      const kept = task.entries.filter(
+        (e) => !entryMatchesAssignee(e, assigneeId, assignees, extraAssignees),
+      );
       if (kept.length === 0) continue;
       const minutes = kept.reduce((sum, e) => sum + (e.minutes ?? 0), 0);
       tasks.push({
@@ -365,7 +408,11 @@ export function mergeAssigneeIntoReport(
     return true;
   });
 
-  const stripped = stripAssigneeFromDays(base.days, assigneeId, uniqAssignees);
+  const extraAssignees = [...(base.extraAssignees ?? []), ...(patch.extraAssignees ?? [])].filter(
+    (row, index, all) => all.findIndex((other) => other.id === row.id) === index,
+  );
+
+  const stripped = stripAssigneeFromDays(base.days, assigneeId, uniqAssignees, extraAssignees);
   const days = mergeDayMaps(stripped, patch.days);
   const totalMinutes = days.reduce((sum, d) => sum + d.totalMinutes, 0);
   const worklogCount = days.reduce(
@@ -386,6 +433,7 @@ export function mergeAssigneeIntoReport(
     totalMinutes,
     totalFormatted: formatMinutesRu(totalMinutes),
     worklogCount,
+    extraAssignees,
     board: {
       ...base.board,
       issuesOnBoard: Math.max(base.board.issuesOnBoard, patch.board.issuesOnBoard),
@@ -402,6 +450,9 @@ export function mergeAssigneeIntoReport(
 
 export function listIssueAssignees(report: TimeReport): IssueAssigneeOption[] {
   const byId = new Map<string, string>();
+  for (const extra of report.extraAssignees ?? []) {
+    byId.set(extra.id, extra.name?.trim() || extra.login || extra.id);
+  }
   for (const day of report.days) {
     for (const task of day.tasks) {
       for (const entry of task.entries) {
@@ -435,7 +486,7 @@ export function buildTimesheet(
       for (const entry of task.entries) {
         const minutes = entry.minutes ?? 0;
         if (minutes <= 0) continue;
-        if (mode === "issue" && !entryMatchesAssignee(entry, issueAssigneeId, assignees)) {
+        if (mode === "issue" && !entryMatchesAssignee(entry, issueAssigneeId, assignees, report.extraAssignees)) {
           continue;
         }
 

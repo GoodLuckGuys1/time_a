@@ -758,6 +758,42 @@ class TrackerClient:
 
         return resolved, mapping, failed
 
+    async def extra_assignee_options(self, client: httpx.AsyncClient) -> list[dict[str, str]]:
+        """Сотрудники из TRACKER_EXTRA_WORKLOG_LOGINS для выпадающих списков."""
+        if not self._settings.extra_worklog_logins:
+            return []
+
+        org_by_login: dict[str, dict[str, Any]] = {}
+        for user in await self.get_org_users(client):
+            login = user.get("login")
+            if login:
+                org_by_login[str(login).casefold()] = user
+
+        rows: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for raw in self._settings.extra_worklog_logins:
+            login = await self.resolve_user_login(client, raw)
+            if not login:
+                continue
+            key = login.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            user = org_by_login.get(key)
+            name = str((user or {}).get("display") or login)
+            uid = (user or {}).get("trackerUid") or (user or {}).get("uid") or (user or {}).get("id")
+            rows.append(
+                {
+                    "id": login,
+                    "login": login,
+                    "uid": str(uid) if uid is not None else "",
+                    "name": name,
+                }
+            )
+
+        rows.sort(key=lambda row: _person_name_sort_key(row["name"]))
+        return rows
+
     @staticmethod
     def _collect_assignee_logins(issues: list[dict[str, Any]]) -> set[str]:
         logins: set[str] = set()
@@ -1165,6 +1201,9 @@ class TrackerClient:
                         issue_key_set.add(key)
                 issue_titles = await self._issue_titles_for_keys(client, issue_key_set)
 
+            extra_assignees = await self.extra_assignee_options(client)
+            org_index = _build_org_user_index(await self.get_org_users(client))
+
         report = aggregate_assignee_worklogs(
             worklogs=worklogs,
             issue_keys=issue_key_set,
@@ -1174,7 +1213,10 @@ class TrackerClient:
             date_to=date_to,
             assignee_key=None if load_all else str(created_by),
             current_user=myself,
+            org_index=org_index,
         )
+        report["extraAssignees"] = extra_assignees
+        report["assignees"] = _merge_extra_assignee_rows(report.get("assignees") or [], extra_assignees)
         report["scope"] = "all" if load_all else "self"
         return report
 
@@ -1229,6 +1271,9 @@ class TrackerClient:
                         issue_key_set.add(key)
                 issue_titles = await self._issue_titles_for_keys(client, issue_key_set)
 
+            extra_assignees = await self.extra_assignee_options(client)
+            org_index = _build_org_user_index(await self.get_org_users(client))
+
         stats = {
             "issuesScanned": len(issue_key_set),
             "worklogsInReport": len(board_worklogs.all),
@@ -1245,6 +1290,7 @@ class TrackerClient:
             date_to=date_to,
             current_user=myself,
             stats=stats,
+            org_index=org_index,
         )
         my_report = aggregate_worklogs(
             worklogs=board_worklogs.mine,
@@ -1254,12 +1300,14 @@ class TrackerClient:
             date_from=date_from,
             date_to=date_to,
             current_user=myself,
+            org_index=org_index,
         )
         report["myDays"] = my_report["days"]
         report["myTotalMinutes"] = my_report["totalMinutes"]
         report["myTotalFormatted"] = my_report["totalFormatted"]
         report["assigneeFilter"] = None if load_all else (only or my_login)
         report["scope"] = "all" if load_all else "self"
+        report["extraAssignees"] = extra_assignees
         return report
 
     async def update_worklog(
@@ -1511,6 +1559,27 @@ def _apply_assignee_worklogs_to_sprint_report(
         report["totalSpentFormatted"] = (
             format_duration(timedelta(minutes=total_spent)) if total_spent else ""
         )
+
+
+def _merge_extra_assignee_rows(
+    assignees: list[dict[str, Any]],
+    extra: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    by_id = {str(row.get("id") or ""): row for row in assignees if row.get("id")}
+    for row in extra:
+        aid = row["id"]
+        if aid in by_id:
+            continue
+        by_id[aid] = {
+            "id": aid,
+            "name": row["name"],
+            "totalMinutes": 0,
+            "totalFormatted": format_duration(timedelta(0)),
+            "worklogCount": 0,
+        }
+    merged = list(by_id.values())
+    merged.sort(key=lambda row: _person_name_sort_key(str(row.get("name") or "")))
+    return merged
 
 
 def _person_name_sort_key(name: str) -> tuple[str, str]:
@@ -2108,13 +2177,42 @@ def _worklog_author_fetch_ids(entries: list[dict[str, Any]]) -> set[str]:
     return ids
 
 
-def _worklog_author_key(entry: dict[str, Any]) -> tuple[str, str]:
+def _build_org_user_index(users: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
+    for user in users:
+        keys: list[str] = []
+        login = user.get("login")
+        for field in ("id", "uid", "trackerUid", "passportUid", "cloudUid"):
+            val = user.get(field)
+            if val is not None:
+                keys.append(str(val))
+        if login:
+            keys.append(str(login))
+            keys.append(str(login).casefold())
+        for key in keys:
+            if key:
+                index[key] = user
+    return index
+
+
+def _worklog_author_key(
+    entry: dict[str, Any],
+    org_index: dict[str, dict[str, Any]] | None = None,
+) -> tuple[str, str, str]:
     author = entry.get("createdBy") or {}
     login = author.get("login")
     uid = author.get("id")
-    display = author.get("display") or login or uid
+    profile = None
+    if org_index:
+        for candidate in (uid, author.get("passportUid"), author.get("cloudUid")):
+            if candidate is not None and str(candidate) in org_index:
+                profile = org_index[str(candidate)]
+                break
+        if profile and not login:
+            login = profile.get("login")
+    display = author.get("display") or (profile or {}).get("display") or login or uid
     key = str(login or uid or display or "__unknown__")
-    return key, str(display or key)
+    return key, str(display or key), str(login or "")
 
 
 def _user_profile_key(user: dict[str, Any]) -> str:
@@ -2153,6 +2251,7 @@ def aggregate_assignee_worklogs(
     date_to: date,
     assignee_key: str | None,
     current_user: dict[str, Any],
+    org_index: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     by_author: dict[str, dict[str, Any]] = {}
     filtered: list[dict[str, Any]] = []
@@ -2169,13 +2268,14 @@ def aggregate_assignee_worklogs(
         if duration <= timedelta(0):
             continue
 
-        author_key, author_name = _worklog_author_key(entry)
+        author_key, author_name, author_login = _worklog_author_key(entry, org_index)
         minutes = int(duration.total_seconds() // 60)
 
         bucket = by_author.get(author_key)
         if not bucket:
             bucket = {
                 "id": author_key,
+                "login": author_login,
                 "name": author_name,
                 "totalMinutes": 0,
                 "worklogCount": 0,
@@ -2296,6 +2396,7 @@ def aggregate_worklogs(
     date_to: date,
     current_user: dict[str, Any] | None = None,
     stats: dict[str, int] | None = None,
+    org_index: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     by_day: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"date": "", "totalMinutes": 0, "totalFormatted": "", "tasks": []}
@@ -2344,8 +2445,7 @@ def aggregate_worklogs(
         day_bucket["totalMinutes"] += minutes
         grand_total += duration
 
-        author_key, author_name = _worklog_author_key(entry)
-        created_by = entry.get("createdBy") or {}
+        author_key, author_name, author_login = _worklog_author_key(entry, org_index)
         task_row["entries"].append(
             {
                 "id": entry.get("id"),
@@ -2356,7 +2456,7 @@ def aggregate_worklogs(
                 "comment": entry.get("comment") or "",
                 "author": author_name,
                 "authorKey": author_key,
-                "authorLogin": str(created_by.get("login") or ""),
+                "authorLogin": author_login,
                 "start": entry.get("start"),
             }
         )

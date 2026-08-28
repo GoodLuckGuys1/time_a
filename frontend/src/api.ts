@@ -27,6 +27,13 @@ export interface DayRow {
   tasks: TaskRow[];
 }
 
+export interface ExtraAssigneeOption {
+  id: string;
+  login?: string;
+  uid?: string;
+  name: string;
+}
+
 export interface TimeReport {
   board: {
     id: number;
@@ -37,6 +44,7 @@ export interface TimeReport {
   period: { from: string; to: string };
   currentUser?: { id: string; login?: string; name: string } | null;
   scope?: "self" | "all";
+  extraAssignees?: ExtraAssigneeOption[];
   totalMinutes: number;
   totalFormatted: string;
   myDays?: DayRow[];

@@ -12,6 +12,7 @@ import {
   formatCellMinutes,
   formatColumnHeader,
   formatTotalMinutes,
+  hasAssigneeInReport,
   isWeekend,
   listIssueAssignees,
   type GroupMode,
@@ -172,6 +173,13 @@ export function TempoTimesheet({
                     void onLoadEveryone();
                   }
                   setSelectedIssueAssignee(next);
+                  if (
+                    next !== ALL_ASSIGNEES_ID &&
+                    onRefreshAssignee &&
+                    !hasAssigneeInReport(report, next, issueAssignees)
+                  ) {
+                    void onRefreshAssignee(next);
+                  }
                 }}
               >
                 <option value={ALL_ASSIGNEES_ID}>
