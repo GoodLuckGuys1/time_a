@@ -36,6 +36,7 @@ export interface TimeReport {
   };
   period: { from: string; to: string };
   currentUser?: { id: string; login?: string; name: string } | null;
+  scope?: "self" | "all";
   totalMinutes: number;
   totalFormatted: string;
   myDays?: DayRow[];
@@ -62,17 +63,42 @@ export interface ConfigStatus {
   hasToken?: boolean;
   hasOrgId?: boolean;
   hasClientId?: boolean;
+  hasClientSecret?: boolean;
   oauthStartUrl?: string;
   oauthRedirectUri?: string;
   oauthScope?: string;
   canEditWorklogs?: boolean;
   oauthAppInfoUrl?: string | null;
+  setupStep?: "oauth_app" | "token" | "org" | "done";
+}
+
+export interface ConfigUpdate {
+  oauthClientId?: string;
+  oauthClientSecret?: string;
+  oauthToken?: string;
+  orgId?: string;
+  orgHeader?: string;
+  boardId?: number;
 }
 
 export async function fetchConfig(): Promise<ConfigStatus> {
   const res = await fetch("/api/config");
   if (!res.ok) throw new Error("Не удалось получить конфигурацию");
   return res.json();
+}
+
+export async function saveConfig(update: ConfigUpdate): Promise<ConfigStatus> {
+  const res = await fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = body.detail;
+    throw new Error(typeof detail === "string" ? detail : "Не удалось сохранить настройки");
+  }
+  return body;
 }
 
 export async function fetchCheckWriteAccess(): Promise<{ ok: boolean; message?: string }> {
@@ -113,6 +139,7 @@ export interface SprintLoadIssue {
   issueKey: string;
   issueTitle: string;
   issueUrl: string;
+  team?: string;
   originalMinutes: number;
   originalFormatted: string;
   minutes: number;
@@ -120,6 +147,8 @@ export interface SprintLoadIssue {
   spentMinutes: number;
   spentFormatted: string;
   status: string;
+  createdAt?: string | null;
+  lateAdded?: boolean;
 }
 
 export interface SprintLoadAssignee {
@@ -135,6 +164,19 @@ export interface SprintLoadAssignee {
   issues: SprintLoadIssue[];
 }
 
+export interface SprintLoadTeam {
+  id: string;
+  name: string;
+  assignees: SprintLoadAssignee[];
+  issueCount: number;
+  totalOriginalMinutes: number;
+  totalOriginalFormatted: string;
+  totalMinutes: number;
+  totalFormatted: string;
+  totalSpentMinutes: number;
+  totalSpentFormatted: string;
+}
+
 export interface SprintLoadGroup {
   label: string;
   sprintId?: string | null;
@@ -142,6 +184,7 @@ export interface SprintLoadGroup {
   showSpent?: boolean;
   sprintStartDate?: string | null;
   sprintEndDate?: string | null;
+  teams?: SprintLoadTeam[];
   assignees: SprintLoadAssignee[];
   issueCount: number;
   issuesWithoutEstimate: number;
@@ -161,6 +204,7 @@ export interface SprintLoadReport {
   };
   groupBy?: "agile" | "label";
   groups?: SprintLoadGroup[];
+  teams?: string[];
   activeLabel?: string | null;
   sprint: {
     id: number | null;
@@ -186,6 +230,7 @@ export interface SprintLoadReport {
     issuesOnBoard?: number;
     issuesWithSprint?: number;
   };
+  scope?: "self" | "all";
 }
 
 export interface AssigneeWorklogEntry {
@@ -225,6 +270,7 @@ export interface AssigneeWorklogReport {
   totalMinutes: number;
   totalFormatted: string;
   worklogCount: number;
+  scope?: "self" | "all";
 }
 
 export async function fetchAssigneeWorklogs(
@@ -242,9 +288,13 @@ export async function fetchAssigneeWorklogs(
   return body as AssigneeWorklogReport;
 }
 
-export async function fetchSprintLoad(boardId?: number): Promise<SprintLoadReport> {
+export async function fetchSprintLoad(
+  boardId?: number,
+  assignee?: string,
+): Promise<SprintLoadReport> {
   const params = new URLSearchParams();
   if (boardId != null) params.set("board_id", String(boardId));
+  if (assignee) params.set("assignee", assignee);
   const qs = params.toString();
   const res = await fetch(`/api/sprint-load${qs ? `?${qs}` : ""}`);
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -254,8 +304,13 @@ export async function fetchSprintLoad(boardId?: number): Promise<SprintLoadRepor
   return body as SprintLoadReport;
 }
 
-export async function fetchTimeReport(from: string, to: string): Promise<TimeReport> {
+export async function fetchTimeReport(
+  from: string,
+  to: string,
+  assignee?: string,
+): Promise<TimeReport> {
   const params = new URLSearchParams({ from, to });
+  if (assignee) params.set("assignee", assignee);
   const res = await fetch(`/api/time-report?${params}`);
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok) {

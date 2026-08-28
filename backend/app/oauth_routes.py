@@ -38,7 +38,7 @@ _CALLBACK_HTML = """<!DOCTYPE html>
       const hasWrite = granted.includes("tracker:write");
       status.className = hasWrite ? "ok" : "err";
       status.innerHTML = hasWrite
-        ? "Токен с <code>tracker:write</code> получен. Скопируйте в <code>.env</code> → <code>TRACKER_OAUTH_TOKEN=</code> и перезапустите backend."
+        ? "Токен с <code>tracker:write</code> получен. Скопируйте строку ниже и вставьте в мастер настройки приложения."
         : "Токен получен <strong>без tracker:write</strong>. В OAuth-приложении добавьте право «Запись в трекер», откройте /oauth/start снова.";
       pre.hidden = false;
       pre.textContent = "access_token=" + token + "\\nscope=" + granted;

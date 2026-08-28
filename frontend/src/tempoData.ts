@@ -1,4 +1,4 @@
-import type { TimeReport } from "./api";
+import type { DayRow, TaskRow, TimeReport } from "./api";
 
 export type GroupMode = "issue" | "user";
 export const ALL_ASSIGNEES_ID = "__all__";
@@ -43,12 +43,19 @@ export function cellKey(rowId: string, date: string): string {
   return `${rowId}|${date}`;
 }
 
+function formatLocalDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 export function enumerateDates(from: string, to: string): string[] {
   const dates: string[] = [];
   const cursor = new Date(from + "T12:00:00");
   const end = new Date(to + "T12:00:00");
   while (cursor <= end) {
-    dates.push(cursor.toISOString().slice(0, 10));
+    dates.push(formatLocalDate(cursor));
     cursor.setDate(cursor.getDate() + 1);
   }
   return dates;
@@ -78,6 +85,117 @@ export function formatCellMinutes(minutes: number): string {
 
 export function formatTotalMinutes(minutes: number): string {
   return formatCellMinutes(minutes) || "0h";
+}
+
+/** План спринта: первоначальная оценка (поле estimation в Tracker — это остаток). */
+export function sprintPlannedMinutes(issue: { originalMinutes: number; minutes: number }): number {
+  if (issue.originalMinutes > 0) return issue.originalMinutes;
+  return issue.minutes;
+}
+
+/** Ключ сортировки по фамилии (последнее слово в display name). */
+export function surnameSortKey(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return "";
+  const parts = trimmed.split(/\s+/);
+  if (parts.length >= 2) return parts[parts.length - 1].toLocaleLowerCase("ru-RU");
+  return trimmed.toLocaleLowerCase("ru-RU");
+}
+
+export function compareBySurname(a: string, b: string): number {
+  const bySurname = surnameSortKey(a).localeCompare(surnameSortKey(b), "ru-RU");
+  if (bySurname !== 0) return bySurname;
+  return a.localeCompare(b, "ru-RU");
+}
+
+export const ALL_TEAMS_ID = "__all_teams__";
+export const NO_TEAM_LABEL = "Без команды";
+
+export function listSprintTeams(
+  report: { teams?: string[]; groups?: { teams?: { id: string; name: string }[] }[] },
+): string[] {
+  const names = new Set<string>(report.teams ?? []);
+  for (const group of report.groups ?? []) {
+    for (const team of group.teams ?? []) {
+      if (team.id && team.id !== NO_TEAM_LABEL) names.add(team.id);
+    }
+  }
+  return [...names].sort((a, b) => {
+    const na = /^Команда-(\d+)$/i.exec(a);
+    const nb = /^Команда-(\d+)$/i.exec(b);
+    if (na && nb) return Number(na[1]) - Number(nb[1]);
+    if (na) return -1;
+    if (nb) return 1;
+    return a.localeCompare(b, "ru-RU");
+  });
+}
+
+export function filterGroupByTeam<
+  T extends {
+    teams?: Array<{
+      id: string;
+      assignees: unknown[];
+      issueCount?: number;
+      totalOriginalMinutes?: number;
+      totalOriginalFormatted?: string;
+      totalMinutes?: number;
+      totalFormatted?: string;
+      totalSpentMinutes?: number;
+      totalSpentFormatted?: string;
+    }>;
+    assignees: unknown[];
+    issueCount?: number;
+    totalOriginalMinutes?: number;
+    totalOriginalFormatted?: string;
+    totalMinutes?: number;
+    totalFormatted?: string;
+    totalSpentMinutes?: number;
+    totalSpentFormatted?: string;
+  },
+>(group: T, selectedTeam: string): T {
+  if (!selectedTeam || selectedTeam === ALL_TEAMS_ID) return group;
+  const teams = (group.teams ?? []).filter((t) => t.id === selectedTeam);
+  if (!teams.length) {
+    return {
+      ...group,
+      teams: [],
+      assignees: [] as T["assignees"],
+      issueCount: 0,
+      totalOriginalMinutes: 0,
+      totalOriginalFormatted: "",
+      totalMinutes: 0,
+      totalFormatted: "",
+      totalSpentMinutes: 0,
+      totalSpentFormatted: "",
+    };
+  }
+  const team = teams[0];
+  return {
+    ...group,
+    teams,
+    assignees: team.assignees as T["assignees"],
+    issueCount: team.issueCount ?? 0,
+    totalOriginalMinutes: team.totalOriginalMinutes ?? 0,
+    totalOriginalFormatted: team.totalOriginalFormatted ?? "",
+    totalMinutes: team.totalMinutes ?? 0,
+    totalFormatted: team.totalFormatted ?? "",
+    totalSpentMinutes: team.totalSpentMinutes ?? 0,
+    totalSpentFormatted: team.totalSpentFormatted ?? "",
+  };
+}
+
+export function listSprintAssignees(
+  report: { groups?: { assignees: { id: string; name: string }[] }[] },
+): { id: string; name: string }[] {
+  const byId = new Map<string, string>();
+  for (const group of report.groups ?? []) {
+    for (const a of group.assignees) {
+      if (!byId.has(a.id)) byId.set(a.id, a.name);
+    }
+  }
+  return [...byId.entries()]
+    .map(([id, name]) => ({ id, name }))
+    .sort((a, b) => compareBySurname(a.name, b.name));
 }
 
 export function minutesFromParts(hours: number, mins: number): number {
@@ -136,6 +254,152 @@ function entryMatchesAssignee(
   return false;
 }
 
+function formatMinutesRu(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h && m) return `${h}ч ${m}м`;
+  if (h) return `${h}ч`;
+  return `${m}м`;
+}
+
+function stripAssigneeFromDays(
+  days: DayRow[],
+  assigneeId: string,
+  assignees: IssueAssigneeOption[],
+): DayRow[] {
+  const result: DayRow[] = [];
+  for (const day of days) {
+    const tasks: TaskRow[] = [];
+    let dayMinutes = 0;
+    for (const task of day.tasks) {
+      const kept = task.entries.filter((e) => !entryMatchesAssignee(e, assigneeId, assignees));
+      if (kept.length === 0) continue;
+      const minutes = kept.reduce((sum, e) => sum + (e.minutes ?? 0), 0);
+      tasks.push({
+        ...task,
+        entries: kept,
+        minutes,
+        formatted: formatMinutesRu(minutes),
+      });
+      dayMinutes += minutes;
+    }
+    if (tasks.length === 0) continue;
+    result.push({
+      date: day.date,
+      tasks,
+      totalMinutes: dayMinutes,
+      totalFormatted: formatMinutesRu(dayMinutes),
+    });
+  }
+  return result;
+}
+
+function mergeDayMaps(baseDays: DayRow[], patchDays: DayRow[]): DayRow[] {
+  const byDate = new Map<string, DayRow>();
+  for (const day of baseDays) {
+    byDate.set(day.date, {
+      date: day.date,
+      totalMinutes: day.totalMinutes,
+      totalFormatted: day.totalFormatted,
+      tasks: day.tasks.map((t) => ({
+        ...t,
+        entries: [...t.entries],
+      })),
+    });
+  }
+
+  for (const patchDay of patchDays) {
+    let day = byDate.get(patchDay.date);
+    if (!day) {
+      day = {
+        date: patchDay.date,
+        totalMinutes: 0,
+        totalFormatted: "0м",
+        tasks: [],
+      };
+      byDate.set(patchDay.date, day);
+    }
+    const taskMap = new Map(day.tasks.map((t) => [t.issueKey, t]));
+    for (const patchTask of patchDay.tasks) {
+      let task = taskMap.get(patchTask.issueKey);
+      if (!task) {
+        task = {
+          issueKey: patchTask.issueKey,
+          issueTitle: patchTask.issueTitle,
+          issueUrl: patchTask.issueUrl,
+          minutes: 0,
+          formatted: "0м",
+          entries: [],
+        };
+        taskMap.set(patchTask.issueKey, task);
+        day.tasks.push(task);
+      }
+      task.entries.push(...patchTask.entries);
+      task.minutes = task.entries.reduce((sum, e) => sum + (e.minutes ?? 0), 0);
+      task.formatted = formatMinutesRu(task.minutes);
+    }
+    day.totalMinutes = day.tasks.reduce((sum, t) => sum + t.minutes, 0);
+    day.totalFormatted = formatMinutesRu(day.totalMinutes);
+  }
+
+  return [...byDate.values()].sort((a, b) => b.date.localeCompare(a.date));
+}
+
+/** Подменяет списания выбранного исполнителя данными точечного /api/time-report?assignee=… */
+export function mergeAssigneeIntoReport(
+  base: TimeReport,
+  patch: TimeReport,
+  assigneeId: string,
+): TimeReport {
+  if (!assigneeId || assigneeId === ALL_ASSIGNEES_ID) return patch;
+
+  const assignees = [
+    ...listIssueAssignees(base),
+    ...listIssueAssignees(patch),
+  ];
+  // уникальные по id
+  const seen = new Set<string>();
+  const uniqAssignees = assignees.filter((a) => {
+    if (seen.has(a.id)) return false;
+    seen.add(a.id);
+    return true;
+  });
+
+  const stripped = stripAssigneeFromDays(base.days, assigneeId, uniqAssignees);
+  const days = mergeDayMaps(stripped, patch.days);
+  const totalMinutes = days.reduce((sum, d) => sum + d.totalMinutes, 0);
+  const worklogCount = days.reduce(
+    (sum, d) => sum + d.tasks.reduce((s, t) => s + t.entries.length, 0),
+    0,
+  );
+
+  const isSelf =
+    !!base.currentUser &&
+    (assigneeId === base.currentUser.id ||
+      (base.currentUser.login && assigneeId === base.currentUser.login) ||
+      uniqAssignees.find((a) => a.id === assigneeId)?.name.trim() ===
+        base.currentUser.name.trim());
+
+  return {
+    ...base,
+    days,
+    totalMinutes,
+    totalFormatted: formatMinutesRu(totalMinutes),
+    worklogCount,
+    board: {
+      ...base.board,
+      issuesOnBoard: Math.max(base.board.issuesOnBoard, patch.board.issuesOnBoard),
+    },
+    ...(isSelf
+      ? {
+          myDays: patch.myDays ?? patch.days,
+          myTotalMinutes: patch.myTotalMinutes ?? patch.totalMinutes,
+          myTotalFormatted: patch.myTotalFormatted ?? patch.totalFormatted,
+        }
+      : {}),
+  };
+}
+
 export function listIssueAssignees(report: TimeReport): IssueAssigneeOption[] {
   const byId = new Map<string, string>();
   for (const day of report.days) {
@@ -148,7 +412,7 @@ export function listIssueAssignees(report: TimeReport): IssueAssigneeOption[] {
   }
   return [...byId.entries()]
     .map(([id, name]) => ({ id, name }))
-    .sort((a, b) => a.name.localeCompare(b.name, "ru-RU"));
+    .sort((a, b) => compareBySurname(a.name, b.name));
 }
 
 function worklogEntryDate(start: string | undefined, fallback: string): string {
@@ -222,7 +486,11 @@ export function buildTimesheet(
     }
   }
 
-  const rows = [...rowsMap.values()].sort((a, b) => b.totalMinutes - a.totalMinutes);
+  const rows = [...rowsMap.values()].sort((a, b) =>
+    mode === "user"
+      ? compareBySurname(a.primary, b.primary)
+      : b.totalMinutes - a.totalMinutes,
+  );
   const colTotals: Record<string, number> = {};
   for (const d of dates) {
     colTotals[d] = rows.reduce((sum, r) => sum + (r.byDate[d] ?? 0), 0);

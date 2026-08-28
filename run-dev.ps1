@@ -69,7 +69,7 @@ Set-Location $root
 
 if (-not (Test-Path ".env")) {
     Copy-Item ".env.example" ".env"
-    Write-Host "Создан .env — заполните TRACKER_OAUTH_TOKEN и TRACKER_ORG_ID"
+    Write-Host "Создан .env — дальше настройка в браузере"
 }
 
 $python = Find-Python
@@ -129,8 +129,9 @@ try {
     }
 
     Write-Host "Frontend: http://localhost:5173"
-    Write-Host "OAuth-токен: http://localhost:5173/oauth/start (или http://127.0.0.1:8000/oauth/start)"
+    Write-Host "Откроется браузер — настройка Tracker в мастере на экране"
     Write-Host "Ctrl+C — остановить оба процесса"
+    Start-Process "http://localhost:5173" | Out-Null
     npm run dev
 }
 finally {

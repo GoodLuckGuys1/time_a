@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import random
 import re
 import time
@@ -30,6 +31,24 @@ def _moscow_period_bounds(date_from: date, date_to: date) -> tuple[str, str]:
     end_day = date_to + timedelta(days=1)
     end = f"{end_day.isoformat()}T00:00:00.000+0300"
     return start, end
+
+
+EVERYONE_ASSIGNEE = "__all__"
+
+
+def _is_everyone_assignee(value: str | None) -> bool:
+    return (value or "").strip().lower() in {EVERYONE_ASSIGNEE, "all", "*"}
+
+
+def _assignee_search_clause(assignee: str | None) -> str:
+    """Фрагмент Tracker QL: ограничить поиск исполнителем. Пусто = все."""
+    raw = (assignee or "").strip()
+    if not raw or _is_everyone_assignee(raw):
+        return ""
+    if raw.lower() in {"me", "me()"}:
+        return " AND Assignee: me()"
+    escaped = raw.replace("\\", "\\\\").replace('"', '\\"')
+    return f' AND Assignee: "{escaped}"'
 
 
 class BoardWorklogs(NamedTuple):
@@ -63,6 +82,13 @@ _SPRINT_LOAD_CACHE_TTL_SEC = 300
 _ORG_USERS_CACHE_TTL_SEC = 3600
 _WORKLOG_SEARCH_CAP = 50
 _MAX_PER_USER_WORKLOG_FETCHES = 120
+# API /worklog/_search фильтрует по createdAt; день в отчёте — по start.
+# Расширяем окно createdAt, чтобы поймать списания задним числом (умеренно, без лавины запросов).
+_CREATED_AT_LOOKBACK_DAYS = 120
+_CREATED_AT_LOOKBACK_MIN_DAYS = 60
+_CREATED_AT_LOOKAHEAD_DAYS = 14
+_WORKLOG_CREATED_CHUNK_DAYS = 14
+_WORKLOG_FETCH_CONCURRENCY = 3
 _ENRICH_KEYS_CHUNK = 50
 _ENRICH_PARALLEL_BATCHES = 4
 _board_worklog_cache: dict[tuple, tuple[float, BoardWorklogs]] = {}
@@ -79,6 +105,9 @@ def invalidate_board_worklog_cache() -> None:
 
 class TrackerClient:
     def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+
+    def update_settings(self, settings: Settings) -> None:
         self._settings = settings
 
     def _headers(self) -> dict[str, str]:
@@ -107,7 +136,14 @@ class TrackerClient:
                 response = await client.request(
                     method, url, headers=self._headers(), params=params, json=json
                 )
-            except (httpx.ReadError, httpx.ConnectError, httpx.WriteError, httpx.TimeoutException) as exc:
+            except (
+                httpx.ReadError,
+                httpx.ConnectError,
+                httpx.WriteError,
+                httpx.TimeoutException,
+                httpx.RemoteProtocolError,
+                httpx.NetworkError,
+            ) as exc:
                 last_network_error = exc
                 if attempt >= _MAX_REQUEST_RETRIES - 1:
                     break
@@ -285,6 +321,8 @@ class TrackerClient:
             "spent",
             "summary",
             "status",
+            "components",
+            "tags",
         ):
             if name in full:
                 row[name] = full[name]
@@ -410,10 +448,12 @@ class TrackerClient:
         board: dict[str, Any],
         *,
         fields: str,
+        assignee: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Все задачи спринтов доски, включая закрытые (не только открытые на колонках)."""
+        """Задачи спринтов доски. Без assignee — все (медленно); с assignee — только его."""
         seen: set[str] = set()
         merged: list[dict[str, Any]] = []
+        clause = _assignee_search_clause(assignee)
 
         def add_batch(batch: list[dict[str, Any]] | BaseException) -> None:
             if isinstance(batch, BaseException):
@@ -426,15 +466,15 @@ class TrackerClient:
 
         # Не используем board.query/filter — на доске часто только открытые задачи.
         seed_coros: list[Any] = [
-            self.search_issues(client, query=f'"Boards": {board_id}', fields=fields),
+            self.search_issues(client, query=f'"Boards": {board_id}{clause}', fields=fields),
             self._search_issues_safe(
                 client,
-                query=f'"Sprints By Board": {board_id}',
+                query=f'"Sprints By Board": {board_id}{clause}',
                 fields=fields,
             ),
             self._search_issues_safe(
                 client,
-                query=f'"Sprint In Progress By Board": {board_id}',
+                query=f'"Sprint In Progress By Board": {board_id}{clause}',
                 fields=fields,
             ),
         ]
@@ -442,6 +482,9 @@ class TrackerClient:
             add_batch(batch)
 
         await self.enrich_issues_agile_fields(client, merged, fields=fields)
+
+        if clause:
+            return merged
 
         sprint_targets: dict[str, str] = {}
         for issue in merged:
@@ -514,6 +557,34 @@ class TrackerClient:
 
         return entries
 
+    @staticmethod
+    def _created_at_search_bounds(date_from: date, date_to: date) -> tuple[date, date]:
+        span = max((date_to - date_from).days + 1, 1)
+        lookback = min(_CREATED_AT_LOOKBACK_DAYS, max(_CREATED_AT_LOOKBACK_MIN_DAYS, span))
+        created_from = date_from - timedelta(days=lookback)
+        created_to = date_to + timedelta(days=_CREATED_AT_LOOKAHEAD_DAYS)
+        return created_from, created_to
+
+    async def _search_worklogs_created_chunks(
+        self,
+        client: httpx.AsyncClient,
+        created_from: date,
+        created_to: date,
+        *,
+        created_by: str,
+    ) -> list[dict[str, Any]]:
+        """Поиск по createdAt небольшими интервалами — меньше обрывов и рекурсии."""
+        collected: list[dict[str, Any]] = []
+        cursor = created_from
+        while cursor <= created_to:
+            chunk_end = min(cursor + timedelta(days=_WORKLOG_CREATED_CHUNK_DAYS - 1), created_to)
+            batch = await self._search_worklogs_range(
+                client, cursor, chunk_end, created_by=created_by
+            )
+            collected = _merge_worklogs(collected, batch)
+            cursor = chunk_end + timedelta(days=1)
+        return collected
+
     async def _search_worklogs_range(
         self,
         client: httpx.AsyncClient,
@@ -534,7 +605,10 @@ class TrackerClient:
         try:
             batch = await self._request(client, "POST", "/v3/worklog/_search", json=body) or []
         except TrackerError:
-            batch = []
+            return []
+
+        if not isinstance(batch, list):
+            return []
 
         if len(batch) < _WORKLOG_SEARCH_CAP or range_from >= range_to:
             return batch
@@ -562,14 +636,16 @@ class TrackerClient:
     ) -> list[dict[str, Any]]:
         """Поиск списаний за период (Tracker отдаёт ~50 записей за запрос без деления)."""
         if created_by:
-            return await self._search_worklogs_range(
-                client, date_from, date_to, created_by=created_by
+            created_from, created_to = self._created_at_search_bounds(date_from, date_to)
+            return await self._search_worklogs_created_chunks(
+                client, created_from, created_to, created_by=created_by
             )
 
         search_from = date_from - timedelta(days=3)
+        search_to = date_to + timedelta(days=_CREATED_AT_LOOKAHEAD_DAYS)
         collected: list[dict[str, Any]] = []
         cursor = search_from
-        while cursor <= date_to:
+        while cursor <= search_to:
             batch = await self._search_worklogs_range(
                 client, cursor, cursor, created_by=None
             )
@@ -650,9 +726,23 @@ class TrackerClient:
         *,
         user_login: str | None = None,
         issues: list[dict[str, Any]] | None = None,
+        only_created_by: str | None = None,
     ) -> BoardWorklogs:
-        """Списания по задачам доски: по каждому сотруднику + общий поиск (лимит API ~50)."""
-        cache_key = (board_id, date_from.isoformat(), date_to.isoformat(), user_login or "", "v4")
+        """Списания по задачам доски: по каждому сотруднику + общий поиск (лимит API ~50).
+
+        only_created_by — точечная загрузка только списаний одного автора (быстрый refresh).
+        """
+        if only_created_by:
+            return await self._fetch_single_author_board_worklogs(
+                client,
+                date_from,
+                date_to,
+                issue_keys,
+                created_by=only_created_by.strip(),
+                user_login=user_login,
+            )
+
+        cache_key = (board_id, date_from.isoformat(), date_to.isoformat(), user_login or "", "v6")
         now = time.monotonic()
 
         async with _tracker_cache_lock:
@@ -665,7 +755,7 @@ class TrackerClient:
             client, board_issues, user_login=user_login
         )
 
-        sem = asyncio.Semaphore(10)
+        sem = asyncio.Semaphore(_WORKLOG_FETCH_CONCURRENCY)
 
         async def fetch_login(login: str) -> list[dict[str, Any]]:
             async with sem:
@@ -673,7 +763,7 @@ class TrackerClient:
                     return await self.search_worklogs_global(
                         client, date_from, date_to, created_by=login
                     )
-                except TrackerError:
+                except (TrackerError, httpx.HTTPError):
                     return []
 
         per_user_groups = await asyncio.gather(*(fetch_login(login) for login in sorted(logins)))
@@ -682,13 +772,6 @@ class TrackerClient:
         )
         raw = _merge_worklogs(global_wl, *per_user_groups)
 
-        user_wl: list[dict[str, Any]] = []
-        if user_login:
-            user_wl = await self.search_worklogs_global(
-                client, date_from, date_to, created_by=user_login
-            )
-            raw = _merge_worklogs(raw, user_wl)
-
         def filter_board(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             out: list[dict[str, Any]] = []
             for entry in entries:
@@ -696,6 +779,21 @@ class TrackerClient:
                 if key and key in issue_keys:
                     out.append(entry)
             return out
+
+        discovered = _worklog_author_fetch_ids(filter_board(raw))
+        extra_logins = discovered - logins
+        if extra_logins:
+            extra_groups = await asyncio.gather(
+                *(fetch_login(login) for login in sorted(extra_logins))
+            )
+            raw = _merge_worklogs(raw, *extra_groups)
+
+        user_wl: list[dict[str, Any]] = []
+        if user_login:
+            user_wl = await self.search_worklogs_global(
+                client, date_from, date_to, created_by=user_login
+            )
+            raw = _merge_worklogs(raw, user_wl)
 
         filtered_all = filter_board(raw)
         filtered_mine = filter_board(user_wl) if user_login else filtered_all
@@ -706,23 +804,62 @@ class TrackerClient:
 
         return result
 
+    async def _fetch_single_author_board_worklogs(
+        self,
+        client: httpx.AsyncClient,
+        date_from: date,
+        date_to: date,
+        issue_keys: set[str] | None,
+        *,
+        created_by: str,
+        user_login: str | None = None,
+    ) -> BoardWorklogs:
+        """Только списания одного автора — без полного скана организации."""
+        try:
+            raw = await self.search_worklogs_global(
+                client, date_from, date_to, created_by=created_by
+            )
+        except (TrackerError, httpx.HTTPError):
+            raw = []
+
+        filtered: list[dict[str, Any]] = []
+        for entry in raw:
+            key = _issue_key(entry.get("issue") or {})
+            if not key:
+                continue
+            if issue_keys is None or key in issue_keys:
+                filtered.append(entry)
+
+        mine = (
+            [e for e in filtered if _worklog_matches_user(e, {"login": user_login})]
+            if user_login
+            else filtered
+        )
+        return BoardWorklogs(filtered, mine)
+
     async def collect_worklogs_for_issues(
         self,
         client: httpx.AsyncClient,
         issue_keys: list[str],
     ) -> list[dict[str, Any]]:
         """Запасной вариант для небольших досок (иначе — fetch_board_worklogs)."""
-        if len(issue_keys) > 80:
-            return []
-
         sem = asyncio.Semaphore(4)
 
         async def one(key: str) -> list[dict[str, Any]]:
             async with sem:
                 try:
-                    return await self.get_issue_worklogs(client, key)
+                    entries = await self.get_issue_worklogs(client, key)
                 except TrackerError:
                     return []
+                stamped: list[dict[str, Any]] = []
+                for entry in entries:
+                    row = dict(entry)
+                    issue = row.get("issue")
+                    if not isinstance(issue, dict) or not issue.get("key"):
+                        base = issue if isinstance(issue, dict) else {}
+                        row["issue"] = {**base, "key": key}
+                    stamped.append(row)
+                return stamped
 
         chunks = await asyncio.gather(*(one(k) for k in issue_keys))
         merged: list[dict[str, Any]] = []
@@ -735,15 +872,76 @@ class TrackerClient:
                     merged.append(entry)
         return merged
 
-    async def fetch_sprint_load_report(self, board_id: int) -> dict[str, Any]:
-        cache_key = (board_id, "v3-sprint-spent-period")
+    async def _issue_titles_for_keys(
+        self, client: httpx.AsyncClient, keys: set[str]
+    ) -> dict[str, str]:
+        titles: dict[str, str] = {}
+        key_list = sorted(k for k in keys if k)
+        for offset in range(0, len(key_list), 40):
+            chunk = key_list[offset : offset + 40]
+            query = "Key: " + ", ".join(chunk)
+            try:
+                issues = await self.search_issues(client, query=query, fields="summary")
+            except TrackerError:
+                issues = []
+            for issue in issues:
+                key = issue.get("key")
+                if key:
+                    titles[str(key)] = str(issue.get("summary") or key)
+            for key in chunk:
+                titles.setdefault(key, key)
+        return titles
+
+    async def fetch_sprint_load_report(
+        self, board_id: int, *, assignee: str | None = None
+    ) -> dict[str, Any]:
+        only = assignee.strip() if assignee and assignee.strip() else None
+        if _is_everyone_assignee(only):
+            report = await self._fetch_sprint_load_skeleton(board_id, assignee_login=None)
+            report["scope"] = "all"
+            return report
+
+        if not only:
+            report = await self._fetch_sprint_load_skeleton(board_id, assignee_login="me()")
+            report["scope"] = "self"
+            return report
+
+        skeleton = self._cached_sprint_skeleton(board_id, None) or self._cached_sprint_skeleton(
+            board_id, "me()"
+        )
+        if skeleton is None or not _sprint_issue_keys_for_assignee(skeleton, only):
+            skeleton = await self._fetch_sprint_load_skeleton(board_id, assignee_login=only)
+        else:
+            skeleton = copy.deepcopy(skeleton)
+
+        report = await self._sprint_load_for_assignee(board_id, skeleton, only)
+        report["scope"] = skeleton.get("scope") or "self"
+        return report
+
+    def _cached_sprint_skeleton(
+        self, board_id: int, assignee_login: str | None
+    ) -> dict[str, Any] | None:
+        cache_key = (board_id, "v9-sprint-late-added", assignee_login or "__all__")
+        now = time.monotonic()
+        cached = _sprint_load_cache.get(cache_key)
+        if cached and now - cached[0] < _SPRINT_LOAD_CACHE_TTL_SEC:
+            return copy.deepcopy(cached[1])
+        return None
+
+    async def _fetch_sprint_load_skeleton(
+        self, board_id: int, *, assignee_login: str | None = None
+    ) -> dict[str, Any]:
+        cache_key = (board_id, "v9-sprint-late-added", assignee_login or "__all__")
         now = time.monotonic()
         async with _tracker_cache_lock:
             cached = _sprint_load_cache.get(cache_key)
             if cached and now - cached[0] < _SPRINT_LOAD_CACHE_TTL_SEC:
-                return cached[1]
+                return copy.deepcopy(cached[1])
 
-        sprint_fields = "sprint,assignee,originalEstimation,estimation,summary,status"
+        sprint_fields = (
+            "sprint,assignee,originalEstimation,estimation,summary,status,"
+            "components,tags,queue,createdAt"
+        )
         name_prefix = self._settings.sprint_tag_prefix
         async with httpx.AsyncClient(timeout=180.0) as client:
             board = await self.get_board(client, board_id)
@@ -752,9 +950,15 @@ class TrackerClient:
                 board_id,
                 board,
                 fields=sprint_fields,
+                assignee=assignee_login,
             )
             sprint_ids: set[str] = set()
+            queue_keys: set[str] = set()
             for issue in issues:
+                queue = issue.get("queue") or {}
+                qkey = queue.get("key") if isinstance(queue, dict) else None
+                if qkey:
+                    queue_keys.add(str(qkey))
                 for _gk, _label, sprint_id, _url in _agile_sprint_groups_for_issue(
                     issue,
                     board_id=board_id,
@@ -766,33 +970,72 @@ class TrackerClient:
             sprint_periods = await self.build_sprint_periods_map(
                 client, board_id, sprint_ids
             )
-            worklogs: list[dict[str, Any]] = []
-            if sprint_periods:
-                issue_key_set = {issue["key"] for issue in issues if issue.get("key")}
-                period_from = min(period[0] for period in sprint_periods.values())
-                period_to = max(period[1] for period in sprint_periods.values())
-                board_worklogs = await self.fetch_board_worklogs(
-                    client,
-                    board_id,
-                    period_from,
-                    period_to,
-                    issue_key_set,
-                    issues=issues,
-                )
-                worklogs = board_worklogs.all
+            team_catalog = await self._fetch_team_catalog(client, queue_keys)
 
             result = _aggregate_sprint_load_by_agile(
                 issues=issues,
                 board=board,
                 board_id=board_id,
                 name_prefix=name_prefix,
-                worklogs=worklogs,
+                worklogs=[],
                 sprint_periods=sprint_periods,
+                team_catalog=team_catalog,
             )
+        result["scope"] = "all" if not assignee_login else "self"
 
         async with _tracker_cache_lock:
             _sprint_load_cache[cache_key] = (now, result)
-        return result
+        return copy.deepcopy(result)
+
+    async def _fetch_team_catalog(
+        self, client: httpx.AsyncClient, queue_keys: set[str]
+    ) -> list[str]:
+        """Компоненты очереди вида «Команда-N» — тот же фильтр, что на доске Tracker."""
+        names: set[str] = set()
+        for qkey in sorted(queue_keys):
+            try:
+                components = await self._request(
+                    client, "GET", f"/v3/queues/{qkey}/components"
+                )
+            except TrackerError:
+                continue
+            if not isinstance(components, list):
+                continue
+            for comp in components:
+                raw = str(comp.get("name") or comp.get("display") or "")
+                team = _normalize_team_name(raw)
+                if team:
+                    names.add(team)
+        return sorted(names, key=_team_sort_key)
+
+    async def _sprint_load_for_assignee(
+        self,
+        board_id: int,
+        skeleton: dict[str, Any],
+        assignee_key: str,
+    ) -> dict[str, Any]:
+        """Списания только по задачам выбранного исполнителя — без загрузки всей доски."""
+        report = copy.deepcopy(skeleton)
+        issue_keys = _sprint_issue_keys_for_assignee(report, assignee_key)
+        if not issue_keys:
+            _filter_sprint_report_to_assignee(report, assignee_key)
+            report["assigneeFilter"] = assignee_key
+            return report
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            worklogs: list[dict[str, Any]] = []
+            keys_list = sorted(issue_keys)
+            for offset in range(0, len(keys_list), 80):
+                chunk = keys_list[offset : offset + 80]
+                worklogs = _merge_worklogs(
+                    worklogs,
+                    await self.collect_worklogs_for_issues(client, chunk),
+                )
+
+        _apply_assignee_worklogs_to_sprint_report(report, assignee_key, worklogs)
+        _filter_sprint_report_to_assignee(report, assignee_key)
+        report["assigneeFilter"] = assignee_key
+        return report
 
     async def fetch_assignee_worklog_report(
         self,
@@ -806,74 +1049,120 @@ class TrackerClient:
                 self.get_board(client, board_id),
                 self.get_myself(client),
             )
-            issues = await self.get_board_issues(
-                client,
-                board_id,
-                board,
-                include_sprint_queries=False,
-            )
-            issue_keys = [issue["key"] for issue in issues if issue.get("key")]
-            issue_titles = {
-                issue["key"]: issue.get("summary") or issue.get("display", issue["key"])
-                for issue in issues
-                if issue.get("key")
-            }
-            issue_key_set = set(issue_keys)
-            board_worklogs = await self.fetch_board_worklogs(
-                client,
-                board_id,
-                date_from,
-                date_to,
-                issue_key_set,
-                user_login=myself.get("login"),
-                issues=issues,
-            )
+            only = assignee_key.strip() if assignee_key and assignee_key.strip() else None
+            load_all = _is_everyone_assignee(only)
+            created_by = None if load_all else (only or myself.get("login") or myself.get("id"))
 
-        return aggregate_assignee_worklogs(
-            worklogs=board_worklogs.all,
+            if load_all:
+                issues = await self.get_board_issues(
+                    client,
+                    board_id,
+                    board,
+                    include_sprint_queries=False,
+                )
+                issue_key_set = {issue["key"] for issue in issues if issue.get("key")}
+                issue_titles = {
+                    issue["key"]: issue.get("summary") or issue.get("display", issue["key"])
+                    for issue in issues
+                    if issue.get("key")
+                }
+                board_worklogs = await self.fetch_board_worklogs(
+                    client,
+                    board_id,
+                    date_from,
+                    date_to,
+                    issue_key_set,
+                    user_login=myself.get("login"),
+                    issues=issues,
+                )
+                worklogs = board_worklogs.all
+            else:
+                board_worklogs = await self._fetch_single_author_board_worklogs(
+                    client,
+                    date_from,
+                    date_to,
+                    None,
+                    created_by=str(created_by),
+                    user_login=myself.get("login"),
+                )
+                worklogs = board_worklogs.all
+                issue_key_set = set()
+                for entry in worklogs:
+                    key = _issue_key(entry.get("issue") or {})
+                    if key:
+                        issue_key_set.add(key)
+                issue_titles = await self._issue_titles_for_keys(client, issue_key_set)
+
+        report = aggregate_assignee_worklogs(
+            worklogs=worklogs,
             issue_keys=issue_key_set,
             issue_titles=issue_titles,
             board=board,
             date_from=date_from,
             date_to=date_to,
-            assignee_key=assignee_key,
+            assignee_key=None if load_all else str(created_by),
             current_user=myself,
         )
+        report["scope"] = "all" if load_all else "self"
+        return report
 
     async def fetch_time_report(
         self,
         board_id: int,
         date_from: date,
         date_to: date,
+        *,
+        assignee: str | None = None,
     ) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=120.0) as client:
             board, myself = await asyncio.gather(
                 self.get_board(client, board_id),
                 self.get_myself(client),
             )
-            issues = await self.get_board_issues(client, board_id, board)
-            issue_keys = [issue["key"] for issue in issues if issue.get("key")]
-            issue_titles = {
-                issue["key"]: issue.get("summary") or issue.get("display", issue["key"])
-                for issue in issues
-                if issue.get("key")
-            }
+            only = assignee.strip() if assignee and assignee.strip() else None
+            load_all = _is_everyone_assignee(only)
+            my_login = myself.get("login")
 
-            issue_key_set = set(issue_keys)
-            board_worklogs = await self.fetch_board_worklogs(
-                client,
-                board_id,
-                date_from,
-                date_to,
-                issue_key_set,
-                user_login=myself.get("login"),
-                issues=issues,
-            )
+            if load_all:
+                issues = await self.get_board_issues(client, board_id, board)
+                issue_key_set = {issue["key"] for issue in issues if issue.get("key")}
+                issue_titles = {
+                    issue["key"]: issue.get("summary") or issue.get("display", issue["key"])
+                    for issue in issues
+                    if issue.get("key")
+                }
+                board_worklogs = await self.fetch_board_worklogs(
+                    client,
+                    board_id,
+                    date_from,
+                    date_to,
+                    issue_key_set,
+                    user_login=my_login,
+                    issues=issues,
+                )
+            else:
+                created_by = only or my_login or myself.get("id")
+                board_worklogs = await self._fetch_single_author_board_worklogs(
+                    client,
+                    date_from,
+                    date_to,
+                    None,
+                    created_by=str(created_by),
+                    user_login=my_login,
+                )
+                issue_key_set = set()
+                for entry in board_worklogs.all:
+                    key = _issue_key(entry.get("issue") or {})
+                    if key:
+                        issue_key_set.add(key)
+                issue_titles = await self._issue_titles_for_keys(client, issue_key_set)
 
         stats = {
-            "issuesScanned": len(issue_keys),
+            "issuesScanned": len(issue_key_set),
             "worklogsInReport": len(board_worklogs.all),
             "myWorklogsInReport": len(board_worklogs.mine),
+            "assigneeFilter": "" if load_all else (only or my_login or ""),
+            "scope": "all" if load_all else "self",
         }
         report = aggregate_worklogs(
             worklogs=board_worklogs.all,
@@ -897,6 +1186,8 @@ class TrackerClient:
         report["myDays"] = my_report["days"]
         report["myTotalMinutes"] = my_report["totalMinutes"]
         report["myTotalFormatted"] = my_report["totalFormatted"]
+        report["assigneeFilter"] = None if load_all else (only or my_login)
+        report["scope"] = "all" if load_all else "self"
         return report
 
     async def update_worklog(
@@ -1004,6 +1295,294 @@ def _board_summary(board: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _sprint_assignee_matches(row_id: str, row_name: str, target: str) -> bool:
+    t = target.strip()
+    if not t:
+        return False
+    if row_id == t:
+        return True
+    if row_name.strip().lower() == t.lower():
+        return True
+    return False
+
+
+def _sprint_issue_keys_for_assignee(report: dict[str, Any], assignee_key: str) -> set[str]:
+    keys: set[str] = set()
+    for group in report.get("groups") or []:
+        for assignee in group.get("assignees") or []:
+            if not _sprint_assignee_matches(
+                str(assignee.get("id") or ""),
+                str(assignee.get("name") or ""),
+                assignee_key,
+            ):
+                continue
+            for issue in assignee.get("issues") or []:
+                key = issue.get("issueKey")
+                if key:
+                    keys.add(str(key))
+    return keys
+
+
+def _recalculate_sprint_group_totals(group: dict[str, Any]) -> None:
+    assignees = group.get("assignees") or []
+    group["issueCount"] = sum(a.get("issueCount") or 0 for a in assignees)
+    original = sum(a.get("totalOriginalMinutes") or 0 for a in assignees)
+    planned = sum(a.get("totalMinutes") or 0 for a in assignees)
+    spent = sum(a.get("totalSpentMinutes") or 0 for a in assignees)
+    group["totalOriginalMinutes"] = original
+    group["totalOriginalFormatted"] = format_duration(timedelta(minutes=original)) if original else ""
+    group["totalMinutes"] = planned
+    group["totalFormatted"] = format_duration(timedelta(minutes=planned)) if planned else ""
+    group["totalSpentMinutes"] = spent
+    group["totalSpentFormatted"] = format_duration(timedelta(minutes=spent)) if spent else ""
+
+
+def _filter_sprint_report_to_assignee(report: dict[str, Any], assignee_key: str) -> None:
+    groups = report.get("groups") or []
+    filtered_groups: list[dict[str, Any]] = []
+    total_issues = 0
+    total_original = 0
+    total_planned = 0
+    total_spent = 0
+    issues_without = 0
+    show_spent = False
+
+    for group in groups:
+        matched = [
+            a
+            for a in group.get("assignees") or []
+            if _sprint_assignee_matches(
+                str(a.get("id") or ""),
+                str(a.get("name") or ""),
+                assignee_key,
+            )
+        ]
+        if not matched:
+            continue
+        group = {**group, "assignees": matched}
+        _recalculate_sprint_group_totals(group)
+        _attach_teams_to_group(group, team_catalog=report.get("teams") or [])
+        filtered_groups.append(group)
+        total_issues += group.get("issueCount") or 0
+        total_original += group.get("totalOriginalMinutes") or 0
+        total_planned += group.get("totalMinutes") or 0
+        total_spent += group.get("totalSpentMinutes") or 0
+        issues_without += group.get("issuesWithoutEstimate") or 0
+        if group.get("showSpent"):
+            show_spent = True
+
+    report["groups"] = filtered_groups
+    report["issueCount"] = total_issues
+    report["issuesWithoutEstimate"] = issues_without
+    report["totalOriginalMinutes"] = total_original
+    report["totalOriginalFormatted"] = (
+        format_duration(timedelta(minutes=total_original)) if total_original else ""
+    )
+    report["totalMinutes"] = total_planned
+    report["totalFormatted"] = format_duration(timedelta(minutes=total_planned)) if total_planned else ""
+    report["showSpentColumn"] = show_spent
+    report["totalSpentMinutes"] = total_spent if show_spent else 0
+    report["totalSpentFormatted"] = (
+        format_duration(timedelta(minutes=total_spent)) if show_spent and total_spent else ""
+    )
+    report["assignees"] = [
+        a for g in filtered_groups for a in g.get("assignees") or []
+    ]
+
+
+def _apply_assignee_worklogs_to_sprint_report(
+    report: dict[str, Any],
+    assignee_key: str,
+    worklogs: list[dict[str, Any]],
+) -> None:
+    for group in report.get("groups") or []:
+        if not group.get("showSpent"):
+            continue
+        start_s = group.get("sprintStartDate")
+        end_s = group.get("sprintEndDate")
+        if not start_s or not end_s:
+            continue
+        date_from = date.fromisoformat(start_s)
+        date_to = date.fromisoformat(end_s)
+
+        for assignee in group.get("assignees") or []:
+            if not _sprint_assignee_matches(
+                str(assignee.get("id") or ""),
+                str(assignee.get("name") or ""),
+                assignee_key,
+            ):
+                continue
+            person_spent = 0
+            for issue in assignee.get("issues") or []:
+                key = issue.get("issueKey")
+                if not key:
+                    continue
+                spent = _worklog_minutes_for_issue(worklogs, key, date_from, date_to)
+                issue["spentMinutes"] = spent
+                issue["spentFormatted"] = (
+                    format_duration(timedelta(minutes=spent)) if spent else "—"
+                )
+                person_spent += spent
+            assignee["totalSpentMinutes"] = person_spent
+            assignee["totalSpentFormatted"] = (
+                format_duration(timedelta(minutes=person_spent)) if person_spent else "—"
+            )
+        _recalculate_sprint_group_totals(group)
+        _attach_teams_to_group(group, team_catalog=report.get("teams") or [])
+
+    groups = report.get("groups") or []
+    show_spent = any(g.get("showSpent") for g in groups)
+    report["showSpentColumn"] = show_spent
+    if show_spent:
+        total_spent = sum(g.get("totalSpentMinutes") or 0 for g in groups)
+        report["totalSpentMinutes"] = total_spent
+        report["totalSpentFormatted"] = (
+            format_duration(timedelta(minutes=total_spent)) if total_spent else ""
+        )
+
+
+def _person_name_sort_key(name: str) -> tuple[str, str]:
+    trimmed = (name or "").strip()
+    if not trimmed:
+        return ("", "")
+    parts = trimmed.split()
+    surname = parts[-1].casefold() if len(parts) >= 2 else trimmed.casefold()
+    return (surname, trimmed.casefold())
+
+
+_NO_TEAM_LABEL = "Без команды"
+
+
+def _normalize_team_name(raw: str) -> str | None:
+    """Нормализует «Команда_4» / «Команда-4» / «Команда 4» → «Команда-4»."""
+    name = (raw or "").strip()
+    if not name:
+        return None
+    match = re.match(r"^Команда[_\-\s]*(\d+)$", name, flags=re.IGNORECASE)
+    if match:
+        return f"Команда-{match.group(1)}"
+    if name.casefold().startswith("команда"):
+        return name
+    return None
+
+
+def _team_sort_key(name: str) -> tuple[int, int, str]:
+    if name == _NO_TEAM_LABEL:
+        return (2, 0, name.casefold())
+    match = re.match(r"^Команда-(\d+)$", name, flags=re.IGNORECASE)
+    if match:
+        return (0, int(match.group(1)), name.casefold())
+    return (1, 0, name.casefold())
+
+
+def _issue_team_label(issue: dict[str, Any]) -> str:
+    for comp in issue.get("components") or []:
+        raw = comp if isinstance(comp, str) else (comp.get("display") or comp.get("name") or "")
+        team = _normalize_team_name(str(raw))
+        if team:
+            return team
+    for tag in issue.get("tags") or []:
+        raw = tag if isinstance(tag, str) else (tag.get("display") or tag.get("name") or "")
+        team = _normalize_team_name(str(raw))
+        if team:
+            return team
+    return _NO_TEAM_LABEL
+
+
+def _finalize_assignee_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    bucket["issueCount"] = len(bucket.get("issues") or [])
+    bucket["totalOriginalMinutes"] = sum(
+        i.get("originalMinutes") or 0 for i in bucket.get("issues") or []
+    )
+    bucket["totalMinutes"] = sum(i.get("minutes") or 0 for i in bucket.get("issues") or [])
+    bucket["totalSpentMinutes"] = sum(
+        i.get("spentMinutes") or 0 for i in bucket.get("issues") or []
+    )
+    bucket["issues"] = sorted(
+        bucket.get("issues") or [],
+        key=lambda row: row.get("minutes") or row.get("originalMinutes") or 0,
+        reverse=True,
+    )
+    bucket["totalOriginalFormatted"] = format_duration(
+        timedelta(minutes=bucket["totalOriginalMinutes"])
+    )
+    bucket["totalFormatted"] = format_duration(timedelta(minutes=bucket["totalMinutes"]))
+    bucket["totalSpentFormatted"] = format_duration(
+        timedelta(minutes=bucket["totalSpentMinutes"])
+    )
+    return bucket
+
+
+def _team_sections_from_assignees(
+    assignees: list[dict[str, Any]],
+    *,
+    team_catalog: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Разбивает исполнителей по командам (компонент/тег «Команда-N»)."""
+    by_team: dict[str, dict[str, dict[str, Any]]] = {}
+    for person in assignees:
+        for issue in person.get("issues") or []:
+            team = str(issue.get("team") or _NO_TEAM_LABEL)
+            people = by_team.setdefault(team, {})
+            bucket = people.get(person["id"])
+            if not bucket:
+                bucket = {
+                    "id": person["id"],
+                    "name": person.get("name") or person["id"],
+                    "issues": [],
+                }
+                people[person["id"]] = bucket
+            bucket["issues"].append(issue)
+
+    catalog = list(team_catalog or [])
+    for team_name in by_team:
+        if team_name != _NO_TEAM_LABEL and team_name not in catalog:
+            catalog.append(team_name)
+    catalog = sorted(
+        [t for t in catalog if t in by_team and t != _NO_TEAM_LABEL],
+        key=_team_sort_key,
+    )
+    if _NO_TEAM_LABEL in by_team:
+        catalog.append(_NO_TEAM_LABEL)
+
+    sections: list[dict[str, Any]] = []
+    for team_name in catalog:
+        people = [
+            _finalize_assignee_bucket(copy.deepcopy(bucket))
+            for bucket in by_team[team_name].values()
+        ]
+        people.sort(key=lambda row: _person_name_sort_key(str(row.get("name") or "")))
+        original = sum(p["totalOriginalMinutes"] for p in people)
+        planned = sum(p["totalMinutes"] for p in people)
+        spent = sum(p["totalSpentMinutes"] for p in people)
+        sections.append(
+            {
+                "id": team_name,
+                "name": team_name,
+                "assignees": people,
+                "issueCount": sum(p["issueCount"] for p in people),
+                "totalOriginalMinutes": original,
+                "totalOriginalFormatted": format_duration(timedelta(minutes=original))
+                if original
+                else "",
+                "totalMinutes": planned,
+                "totalFormatted": format_duration(timedelta(minutes=planned)) if planned else "",
+                "totalSpentMinutes": spent,
+                "totalSpentFormatted": format_duration(timedelta(minutes=spent)) if spent else "",
+            }
+        )
+    return sections
+
+
+def _attach_teams_to_group(
+    group: dict[str, Any], *, team_catalog: list[str] | None = None
+) -> None:
+    group["teams"] = _team_sections_from_assignees(
+        group.get("assignees") or [],
+        team_catalog=team_catalog if team_catalog is not None else group.get("teamCatalog"),
+    )
+
+
 def _assignee_label(issue: dict[str, Any]) -> tuple[str, str]:
     assignee = issue.get("assignee") or {}
     if not assignee:
@@ -1061,6 +1640,15 @@ def _sprint_period_from_api(sprint: dict[str, Any]) -> tuple[date, date] | None:
     return None
 
 
+def _worklog_entry_issue_key(entry: dict[str, Any]) -> str | None:
+    key = _issue_key(entry.get("issue") or {})
+    if key:
+        return key
+    self_url = str(entry.get("self") or "")
+    match = re.search(r"/issues/([^/]+)/worklog", self_url)
+    return match.group(1) if match else None
+
+
 def _worklog_minutes_for_issue(
     worklogs: list[dict[str, Any]],
     issue_key: str,
@@ -1069,7 +1657,7 @@ def _worklog_minutes_for_issue(
 ) -> int:
     total = 0
     for entry in worklogs:
-        if _issue_key(entry.get("issue") or {}) != issue_key:
+        if _worklog_entry_issue_key(entry) != issue_key:
             continue
         day = _worklog_day(entry)
         if not day or day < date_from or day > date_to:
@@ -1078,6 +1666,18 @@ def _worklog_minutes_for_issue(
         if duration > timedelta(0):
             total += int(duration.total_seconds() // 60)
     return total
+
+
+def _issue_created_date(issue: dict[str, Any]) -> date | None:
+    raw = issue.get("createdAt")
+    if not raw or not isinstance(raw, str):
+        return None
+    dt = _parse_tracker_datetime(raw)
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(REPORT_TZ).date()
 
 
 def _agile_sprint_groups_for_issue(
@@ -1139,6 +1739,7 @@ def _build_assignee_buckets(
     issues: list[dict[str, Any]],
     *,
     spent_by_issue: dict[str, int] | None = None,
+    sprint_start: date | None = None,
 ) -> tuple[list[dict[str, Any]], int, int, int, int]:
     by_assignee: dict[str, dict[str, Any]] = {}
     issues_without_estimate = 0
@@ -1154,9 +1755,10 @@ def _build_assignee_buckets(
 
         assignee_id, assignee_name = _assignee_label(issue)
         original = _issue_original_estimation_minutes(issue)
-        planned = _issue_estimation_minutes(issue)
+        # estimation в Tracker — остаток работы, не первоначальный план.
+        remaining = _issue_estimation_minutes(issue)
         spent = spent_by_issue.get(key, 0) if track_spent else 0
-        if original <= 0 and planned <= 0:
+        if original <= 0 and remaining <= 0:
             issues_without_estimate += 1
 
         bucket = by_assignee.get(assignee_id)
@@ -1176,26 +1778,31 @@ def _build_assignee_buckets(
             by_assignee[assignee_id] = bucket
 
         status = (issue.get("status") or {}).get("display") or (issue.get("status") or {}).get("key")
+        created = _issue_created_date(issue)
+        late_added = bool(sprint_start and created and created > sprint_start)
         bucket["issues"].append(
             {
                 "issueKey": key,
                 "issueTitle": issue.get("summary") or key,
                 "issueUrl": f"https://tracker.yandex.ru/{key}",
+                "team": _issue_team_label(issue),
                 "originalMinutes": original,
                 "originalFormatted": format_duration(timedelta(minutes=original)) if original else "—",
-                "minutes": planned,
-                "formatted": format_duration(timedelta(minutes=planned)) if planned else "—",
+                "minutes": remaining,
+                "formatted": format_duration(timedelta(minutes=remaining)) if remaining else "—",
                 "spentMinutes": spent,
                 "spentFormatted": format_duration(timedelta(minutes=spent)) if spent else "—",
                 "status": status or "",
+                "createdAt": created.isoformat() if created else None,
+                "lateAdded": late_added,
             }
         )
         bucket["issueCount"] += 1
         bucket["totalOriginalMinutes"] += original
-        bucket["totalMinutes"] += planned
+        bucket["totalMinutes"] += remaining
         bucket["totalSpentMinutes"] += spent
         grand_original += original
-        grand_planned += planned
+        grand_planned += remaining
         grand_spent += spent
 
     assignees = []
@@ -1206,7 +1813,7 @@ def _build_assignee_buckets(
         bucket["totalSpentFormatted"] = format_duration(timedelta(minutes=bucket["totalSpentMinutes"]))
         assignees.append(bucket)
 
-    assignees.sort(key=lambda row: row["totalMinutes"] or row["totalOriginalMinutes"], reverse=True)
+    assignees.sort(key=lambda row: _person_name_sort_key(str(row.get("name") or "")))
     return assignees, issues_without_estimate, grand_planned, grand_original, grand_spent
 
 
@@ -1218,9 +1825,11 @@ def _aggregate_sprint_load_by_agile(
     name_prefix: str,
     worklogs: list[dict[str, Any]] | None = None,
     sprint_periods: dict[str, tuple[date, date]] | None = None,
+    team_catalog: list[str] | None = None,
 ) -> dict[str, Any]:
     by_group: dict[str, dict[str, Any]] = {}
     unlabeled: list[dict[str, Any]] = []
+    catalog = list(team_catalog or [])
 
     for issue in issues:
         sprint_groups = _agile_sprint_groups_for_issue(
@@ -1253,9 +1862,9 @@ def _aggregate_sprint_load_by_agile(
     ):
         sprint_id = meta.get("sprintId")
         period = periods.get(str(sprint_id)) if sprint_id is not None else None
-        show_spent = bool(period and wl)
+        show_spent = bool(period)
         spent_by_issue: dict[str, int] | None = None
-        if show_spent and period:
+        if period and wl:
             date_from, date_to = period
             spent_by_issue = {
                 issue["key"]: _worklog_minutes_for_issue(wl, issue["key"], date_from, date_to)
@@ -1266,53 +1875,54 @@ def _aggregate_sprint_load_by_agile(
         assignees, issues_without_estimate, total_planned, total_original, total_spent = _build_assignee_buckets(
             meta["issues"],
             spent_by_issue=spent_by_issue,
+            sprint_start=period[0] if period else None,
         )
-        groups.append(
-            {
-                "label": meta["label"],
-                "sprintId": meta.get("sprintId"),
-                "url": meta.get("url"),
-                "showSpent": show_spent,
-                "sprintStartDate": period[0].isoformat() if period else None,
-                "sprintEndDate": period[1].isoformat() if period else None,
-                "assignees": assignees,
-                "issueCount": sum(a["issueCount"] for a in assignees),
-                "issuesWithoutEstimate": issues_without_estimate,
-                "totalOriginalMinutes": total_original,
-                "totalOriginalFormatted": format_duration(timedelta(minutes=total_original)),
-                "totalMinutes": total_planned,
-                "totalFormatted": format_duration(timedelta(minutes=total_planned)),
-                "totalSpentMinutes": total_spent if show_spent else 0,
-                "totalSpentFormatted": format_duration(timedelta(minutes=total_spent))
-                if show_spent and total_spent
-                else "",
-            }
-        )
+        group = {
+            "label": meta["label"],
+            "sprintId": meta.get("sprintId"),
+            "url": meta.get("url"),
+            "showSpent": show_spent,
+            "sprintStartDate": period[0].isoformat() if period else None,
+            "sprintEndDate": period[1].isoformat() if period else None,
+            "assignees": assignees,
+            "issueCount": sum(a["issueCount"] for a in assignees),
+            "issuesWithoutEstimate": issues_without_estimate,
+            "totalOriginalMinutes": total_original,
+            "totalOriginalFormatted": format_duration(timedelta(minutes=total_original)),
+            "totalMinutes": total_planned,
+            "totalFormatted": format_duration(timedelta(minutes=total_planned)),
+            "totalSpentMinutes": total_spent if show_spent else 0,
+            "totalSpentFormatted": format_duration(timedelta(minutes=total_spent))
+            if show_spent and total_spent
+            else "",
+        }
+        _attach_teams_to_group(group, team_catalog=catalog)
+        groups.append(group)
 
     if unlabeled:
         assignees, issues_without_estimate, total_planned, total_original, total_spent = _build_assignee_buckets(
             unlabeled,
             spent_by_issue=None,
         )
-        groups.append(
-            {
-                "label": "Без спринта",
-                "sprintId": None,
-                "url": _board_summary(board)["url"],
-                "showSpent": False,
-                "sprintStartDate": None,
-                "sprintEndDate": None,
-                "assignees": assignees,
-                "issueCount": sum(a["issueCount"] for a in assignees),
-                "issuesWithoutEstimate": issues_without_estimate,
-                "totalOriginalMinutes": total_original,
-                "totalOriginalFormatted": format_duration(timedelta(minutes=total_original)),
-                "totalMinutes": total_planned,
-                "totalFormatted": format_duration(timedelta(minutes=total_planned)),
-                "totalSpentMinutes": 0,
-                "totalSpentFormatted": "",
-            }
-        )
+        group = {
+            "label": "Без спринта",
+            "sprintId": None,
+            "url": _board_summary(board)["url"],
+            "showSpent": False,
+            "sprintStartDate": None,
+            "sprintEndDate": None,
+            "assignees": assignees,
+            "issueCount": sum(a["issueCount"] for a in assignees),
+            "issuesWithoutEstimate": issues_without_estimate,
+            "totalOriginalMinutes": total_original,
+            "totalOriginalFormatted": format_duration(timedelta(minutes=total_original)),
+            "totalMinutes": total_planned,
+            "totalFormatted": format_duration(timedelta(minutes=total_planned)),
+            "totalSpentMinutes": 0,
+            "totalSpentFormatted": "",
+        }
+        _attach_teams_to_group(group, team_catalog=catalog)
+        groups.append(group)
 
     active = groups[0] if groups else None
     total_issues = sum(g["issueCount"] for g in groups)
@@ -1334,6 +1944,7 @@ def _aggregate_sprint_load_by_agile(
         "board": _board_summary(board),
         "groupBy": "agile",
         "groups": groups,
+        "teams": catalog,
         "activeLabel": active["label"] if active else None,
         "sprint": {
             "id": active.get("sprintId") if active else None,
@@ -1409,6 +2020,20 @@ def _parse_tracker_datetime(raw: str) -> datetime | None:
         return datetime.fromisoformat(normalized)
     except ValueError:
         return None
+
+
+def _worklog_author_fetch_ids(entries: list[dict[str, Any]]) -> set[str]:
+    """Логин/id автора списания для догрузки через createdBy."""
+    ids: set[str] = set()
+    for entry in entries:
+        author = entry.get("createdBy") or {}
+        login = author.get("login")
+        uid = author.get("id")
+        if login:
+            ids.add(str(login))
+        elif uid:
+            ids.add(str(uid))
+    return ids
 
 
 def _worklog_author_key(entry: dict[str, Any]) -> tuple[str, str]:
@@ -1498,7 +2123,10 @@ def aggregate_assignee_worklogs(
             }
         )
 
-    assignees = sorted(by_author.values(), key=lambda row: row["totalMinutes"], reverse=True)
+    assignees = sorted(
+        by_author.values(),
+        key=lambda row: _person_name_sort_key(str(row.get("name") or "")),
+    )
     for row in assignees:
         row["totalFormatted"] = format_duration(timedelta(minutes=row["totalMinutes"]))
 
