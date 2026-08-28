@@ -7,6 +7,7 @@ import {
   type TimeReport,
 } from "./api";
 import { LoadingOverlay, LoadingPanel, LoadingSpinner } from "./LoadingSpinner";
+import { SettingsModal } from "./SettingsModal";
 import { SetupWizard } from "./SetupWizard";
 import { TempoTimesheet } from "./TempoTimesheet";
 import { mergeAssigneeIntoReport } from "./tempoData";
@@ -47,6 +48,7 @@ export default function App() {
   const [assigneeRefreshing, setAssigneeRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [writeAccess, setWriteAccess] = useState<{ ok: boolean; message?: string } | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const refreshConfig = useCallback(async () => {
     const c = await fetchConfig();
@@ -86,6 +88,15 @@ export default function App() {
       setLoading(false);
     }
   }, [from, to]);
+
+  const handleSettingsSaved = useCallback(
+    (next: ConfigStatus) => {
+      setCfg(next);
+      fetchCheckWriteAccess().then(setWriteAccess).catch(() => setWriteAccess({ ok: false }));
+      if (configured) void load(report?.scope === "all");
+    },
+    [configured, load, report?.scope],
+  );
 
   const refreshAssignee = useCallback(
     async (assigneeId: string) => {
@@ -223,8 +234,23 @@ export default function App() {
             {loading && <LoadingSpinner size="sm" label="Загрузка" />}
             {loading ? "…" : "Обновить"}
           </button>
+          {configured && (
+            <button
+              type="button"
+              className="btn btn-ghost btn-icon"
+              title="Настройки"
+              aria-label="Настройки"
+              onClick={() => setSettingsOpen(true)}
+            >
+              ⚙
+            </button>
+          )}
         </div>
       </header>
+
+      {settingsOpen && cfg && (
+        <SettingsModal cfg={cfg} onClose={() => setSettingsOpen(false)} onSaved={handleSettingsSaved} />
+      )}
 
       {configured === false && cfg && <SetupWizard cfg={cfg} onConfigured={handleConfigured} />}
 

@@ -70,6 +70,8 @@ export interface ConfigStatus {
   canEditWorklogs?: boolean;
   oauthAppInfoUrl?: string | null;
   setupStep?: "oauth_app" | "token" | "org" | "done";
+  orgId?: string | null;
+  extraWorklogLogins?: string[];
 }
 
 export interface ConfigUpdate {
@@ -79,6 +81,7 @@ export interface ConfigUpdate {
   orgId?: string;
   orgHeader?: string;
   boardId?: number;
+  extraWorklogLogins?: string[];
 }
 
 export async function fetchConfig(): Promise<ConfigStatus> {

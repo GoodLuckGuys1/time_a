@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from .errors import format_api_error
 from .org_discovery import extract_org_ids_from_text, probe_without_org, test_org_access, try_discover_org_ids
-from .tracker import TrackerClient, TrackerError, today_report
+from .tracker import TrackerClient, TrackerError, invalidate_board_worklog_cache, today_report
 
 app = FastAPI(title="Yandex Tracker Time Analytics", version="1.0.0")
 app.include_router(oauth_router)
@@ -57,6 +57,8 @@ async def config_status() -> dict:
             else None
         ),
         "setupStep": _setup_step(cfg),
+        "orgId": cfg.org_id if cfg.org_id else None,
+        "extraWorklogLogins": list(cfg.extra_worklog_logins),
     }
 
 
@@ -77,6 +79,7 @@ class ConfigUpdateBody(BaseModel):
     orgId: Optional[str] = None
     orgHeader: Optional[str] = None
     boardId: Optional[int] = None
+    extraWorklogLogins: Optional[list[str]] = None
 
 
 def _normalize_token(raw: str) -> str:
@@ -109,6 +112,9 @@ async def update_config(body: ConfigUpdateBody) -> dict:
             updates["TRACKER_ORG_HEADER"] = header
     if body.boardId is not None and body.boardId > 0:
         updates["TRACKER_BOARD_ID"] = str(body.boardId)
+    if body.extraWorklogLogins is not None:
+        logins = [login.strip() for login in body.extraWorklogLogins if login.strip()]
+        updates["TRACKER_EXTRA_WORKLOG_LOGINS"] = ",".join(logins)
 
     if not updates:
         raise HTTPException(status_code=400, detail="Нечего сохранять")
@@ -116,6 +122,8 @@ async def update_config(body: ConfigUpdateBody) -> dict:
     apply_env_updates(updates)
     cfg = reload_settings()
     client.update_settings(cfg)
+    if "TRACKER_EXTRA_WORKLOG_LOGINS" in updates or body.oauthToken is not None or body.boardId is not None:
+        invalidate_board_worklog_cache()
 
     if body.orgId is not None and cfg.tracker_token:
         probe = await test_org_access(cfg, body.orgId.strip(), cfg.org_header)
