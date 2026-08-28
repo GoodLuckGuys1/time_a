@@ -63,17 +63,42 @@ export interface ConfigStatus {
   hasToken?: boolean;
   hasOrgId?: boolean;
   hasClientId?: boolean;
+  hasClientSecret?: boolean;
   oauthStartUrl?: string;
   oauthRedirectUri?: string;
   oauthScope?: string;
   canEditWorklogs?: boolean;
   oauthAppInfoUrl?: string | null;
+  setupStep?: "oauth_app" | "token" | "org" | "done";
+}
+
+export interface ConfigUpdate {
+  oauthClientId?: string;
+  oauthClientSecret?: string;
+  oauthToken?: string;
+  orgId?: string;
+  orgHeader?: string;
+  boardId?: number;
 }
 
 export async function fetchConfig(): Promise<ConfigStatus> {
   const res = await fetch("/api/config");
   if (!res.ok) throw new Error("Не удалось получить конфигурацию");
   return res.json();
+}
+
+export async function saveConfig(update: ConfigUpdate): Promise<ConfigStatus> {
+  const res = await fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = body.detail;
+    throw new Error(typeof detail === "string" ? detail : "Не удалось сохранить настройки");
+  }
+  return body;
 }
 
 export async function fetchCheckWriteAccess(): Promise<{ ok: boolean; message?: string }> {

@@ -7,7 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import env_snapshot, settings
+from .config import env_snapshot, reload_settings, settings
+from .env_store import apply_env_updates, env_file_path
 from .oauth_routes import router as oauth_router
 from pydantic import BaseModel
 
@@ -41,7 +42,7 @@ async def config_status() -> dict:
         "configured": cfg.is_configured,
         "boardId": cfg.board_id,
         "orgHeader": cfg.org_header,
-        "envPath": str(Path(__file__).resolve().parents[2] / ".env"),
+        "envPath": str(env_file_path()),
         "hasToken": bool(cfg.tracker_token),
         "hasOrgId": bool(cfg.org_id),
         "hasClientId": bool(cfg.oauth_client_id),
@@ -55,15 +56,82 @@ async def config_status() -> dict:
             if cfg.oauth_client_id
             else None
         ),
+        "setupStep": _setup_step(cfg),
     }
+
+
+def _setup_step(cfg) -> str:
+    if cfg.is_configured:
+        return "done"
+    if not cfg.oauth_client_id or not cfg.oauth_client_secret:
+        return "oauth_app"
+    if not cfg.tracker_token:
+        return "token"
+    return "org"
+
+
+class ConfigUpdateBody(BaseModel):
+    oauthClientId: Optional[str] = None
+    oauthClientSecret: Optional[str] = None
+    oauthToken: Optional[str] = None
+    orgId: Optional[str] = None
+    orgHeader: Optional[str] = None
+    boardId: Optional[int] = None
+
+
+def _normalize_token(raw: str) -> str:
+    value = raw.strip()
+    if not value:
+        return ""
+    for prefix in ("TRACKER_OAUTH_TOKEN=", "access_token=", "OAuth ", "oauth ", "Bearer ", "bearer "):
+        if value.lower().startswith(prefix.lower()):
+            value = value[len(prefix) :].strip()
+            break
+    if "&" in value:
+        value = value.split("&", 1)[0]
+    return value.strip().strip('"')
+
+
+@app.post("/api/config")
+async def update_config(body: ConfigUpdateBody) -> dict:
+    updates: dict[str, str] = {}
+    if body.oauthClientId is not None:
+        updates["TRACKER_OAUTH_CLIENT_ID"] = body.oauthClientId.strip()
+    if body.oauthClientSecret is not None:
+        updates["TRACKER_OAUTH_CLIENT_SECRET"] = body.oauthClientSecret.strip()
+    if body.oauthToken is not None:
+        updates["TRACKER_OAUTH_TOKEN"] = _normalize_token(body.oauthToken)
+    if body.orgId is not None:
+        updates["TRACKER_ORG_ID"] = body.orgId.strip()
+    if body.orgHeader is not None:
+        header = body.orgHeader.strip()
+        if header in ("X-Org-ID", "X-Cloud-Org-ID"):
+            updates["TRACKER_ORG_HEADER"] = header
+    if body.boardId is not None and body.boardId > 0:
+        updates["TRACKER_BOARD_ID"] = str(body.boardId)
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="Нечего сохранять")
+
+    apply_env_updates(updates)
+    cfg = reload_settings()
+    client.update_settings(cfg)
+
+    if body.orgId is not None and cfg.tracker_token:
+        probe = await test_org_access(cfg, body.orgId.strip(), cfg.org_header)
+        if not probe.get("ok"):
+            hint = probe.get("hint") or "Проверьте ID организации"
+            raise HTTPException(status_code=400, detail=hint)
+
+    return await config_status()
 
 
 @app.get("/api/check-write-access")
 async def check_write_access() -> dict:
     if not settings.tracker_token:
-        return {"ok": False, "message": "Нет TRACKER_OAUTH_TOKEN в .env"}
+        return {"ok": False, "message": "Сначала получите OAuth-токен в мастере настройки"}
     if not settings.org_id:
-        return {"ok": False, "message": "Нет TRACKER_ORG_ID в .env"}
+        return {"ok": False, "message": "Укажите ID организации в мастере настройки"}
     try:
         return await client.check_write_scope()
     except TrackerError as exc:
@@ -78,10 +146,11 @@ async def test_org(
     org_id: str = Query(..., min_length=1),
     org_header: str = Query("X-Org-ID"),
 ) -> dict:
-    if not settings.tracker_token:
-        raise HTTPException(status_code=503, detail="Сначала укажите TRACKER_OAUTH_TOKEN в .env")
+    cfg = env_snapshot()
+    if not cfg.tracker_token:
+        raise HTTPException(status_code=503, detail="Сначала получите OAuth-токен в мастере настройки")
     header = org_header if org_header in ("X-Org-ID", "X-Cloud-Org-ID") else "X-Org-ID"
-    return await test_org_access(settings, org_id.strip(), header)
+    return await test_org_access(cfg, org_id.strip(), header)
 
 
 class DiscoverOrgBody(BaseModel):
@@ -168,7 +237,7 @@ async def assignee_worklogs(
     if not settings.is_configured:
         raise HTTPException(
             status_code=503,
-            detail="Задайте TRACKER_OAUTH_TOKEN и TRACKER_ORG_ID в файле .env",
+            detail="Завершите настройку в мастере на экране",
         )
 
     today = today_report()
@@ -203,7 +272,7 @@ async def sprint_load(
     if not settings.is_configured:
         raise HTTPException(
             status_code=503,
-            detail="Задайте TRACKER_OAUTH_TOKEN и TRACKER_ORG_ID в файле .env",
+            detail="Завершите настройку в мастере на экране",
         )
 
     target_board = board_id or settings.board_id
@@ -232,7 +301,7 @@ async def time_report(
     if not settings.is_configured:
         raise HTTPException(
             status_code=503,
-            detail="Задайте TRACKER_OAUTH_TOKEN и TRACKER_ORG_ID в файле .env",
+            detail="Завершите настройку в мастере на экране",
         )
 
     today = today_report()
@@ -273,7 +342,7 @@ def _require_configured() -> None:
     if not settings.is_configured:
         raise HTTPException(
             status_code=503,
-            detail="Задайте TRACKER_OAUTH_TOKEN и TRACKER_ORG_ID в файле .env",
+            detail="Завершите настройку в мастере на экране",
         )
 
 

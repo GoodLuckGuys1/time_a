@@ -6,7 +6,7 @@ cd "$ROOT"
 
 if [[ ! -f .env ]]; then
   cp .env.example .env
-  echo "Создан .env — заполните TRACKER_OAUTH_TOKEN и TRACKER_ORG_ID"
+  echo "Создан .env — дальше настройка в браузере"
 fi
 
 if ! command -v python3 &>/dev/null; then
@@ -52,6 +52,16 @@ if [[ ! -d node_modules ]]; then
 fi
 
 echo "Frontend: http://localhost:5173"
-echo "OAuth-токен: http://localhost:5173/oauth/start (или http://127.0.0.1:8000/oauth/start)"
+echo "Откроется браузер — настройка Tracker в мастере на экране"
 echo "Ctrl+C — остановить оба процесса"
+
+(
+  sleep 3
+  if command -v open &>/dev/null; then
+    open "http://localhost:5173"
+  elif command -v xdg-open &>/dev/null; then
+    xdg-open "http://localhost:5173"
+  fi
+) &
+
 npm run dev

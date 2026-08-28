@@ -471,6 +471,141 @@
   color: var(--text-muted);
 }
 
+.setup-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(6, 8, 12, 0.78);
+  backdrop-filter: blur(8px);
+}
+
+.setup-modal {
+  width: min(560px, 100%);
+  max-height: min(92vh, 720px);
+  overflow: auto;
+  padding: 1.1rem 1.15rem 1rem;
+}
+
+.setup-header {
+  margin-bottom: 0.85rem;
+}
+
+.setup-kicker {
+  margin: 0 0 0.25rem;
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.setup-header h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.2rem;
+}
+
+.setup-lead {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+
+.setup-steps {
+  display: flex;
+  gap: 0.35rem;
+  list-style: none;
+  margin: 0 0 0.9rem;
+  padding: 0;
+}
+
+.setup-steps li {
+  flex: 1;
+  text-align: center;
+  padding: 0.35rem 0.4rem;
+  border-radius: 8px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+
+.setup-steps li.active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: var(--accent-soft);
+}
+
+.setup-steps li.done {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+}
+
+.setup-panel p {
+  margin: 0 0 0.75rem;
+  font-size: 0.86rem;
+  color: var(--text-muted);
+}
+
+.setup-field {
+  margin-bottom: 0.65rem;
+}
+
+.setup-textarea {
+  width: 100%;
+  min-height: 4.5rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+}
+
+.setup-help {
+  margin: 0.25rem 0 0.5rem;
+}
+
+.setup-script {
+  margin: 0.5rem 0 0;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.22);
+  font-size: 0.72rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.setup-hint {
+  margin: 0.65rem 0 0;
+  font-size: 0.82rem;
+  color: var(--success);
+}
+
+.setup-error {
+  margin: 0.75rem 0 0;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  font-size: 0.84rem;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+}
+
 .checklist {
   list-style: none;
   margin: 0.75rem 0;

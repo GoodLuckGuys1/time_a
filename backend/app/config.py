@@ -69,3 +69,10 @@ def env_snapshot() -> Settings:
     load_dotenv(_ROOT / ".env", override=True)
     load_dotenv(_ROOT / "backend" / ".env", override=True)
     return Settings.from_env()
+
+
+def reload_settings() -> Settings:
+    """Перечитать .env и обновить глобальный settings без перезапуска uvicorn."""
+    global settings
+    settings = env_snapshot()
+    return settings

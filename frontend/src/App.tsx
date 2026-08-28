@@ -3,11 +3,11 @@ import {
   fetchCheckWriteAccess,
   fetchConfig,
   fetchTimeReport,
-  testOrgId,
   type ConfigStatus,
   type TimeReport,
 } from "./api";
 import { LoadingOverlay, LoadingPanel, LoadingSpinner } from "./LoadingSpinner";
+import { SetupWizard } from "./SetupWizard";
 import { TempoTimesheet } from "./TempoTimesheet";
 import { mergeAssigneeIntoReport } from "./tempoData";
 import "./App.css";
@@ -46,23 +46,33 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [assigneeRefreshing, setAssigneeRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [orgInput, setOrgInput] = useState("");
-  const [orgHeader, setOrgHeader] = useState("X-Org-ID");
-  const [orgTestMsg, setOrgTestMsg] = useState<string | null>(null);
-  const [showOrgHelp, setShowOrgHelp] = useState(false);
   const [writeAccess, setWriteAccess] = useState<{ ok: boolean; message?: string } | null>(null);
 
+  const refreshConfig = useCallback(async () => {
+    const c = await fetchConfig();
+    setCfg(c);
+    setConfigured(c.configured);
+    return c;
+  }, []);
+
   useEffect(() => {
-    fetchConfig()
+    refreshConfig()
       .then((c) => {
-        setCfg(c);
-        setConfigured(c.configured);
         if (c.configured) {
           fetchCheckWriteAccess().then(setWriteAccess).catch(() => setWriteAccess({ ok: false }));
         }
       })
       .catch(() => setConfigured(false));
-  }, []);
+  }, [refreshConfig]);
+
+  const handleConfigured = useCallback(
+    (next: ConfigStatus) => {
+      setCfg(next);
+      setConfigured(true);
+      fetchCheckWriteAccess().then(setWriteAccess).catch(() => setWriteAccess({ ok: false }));
+    },
+    [],
+  );
 
   const load = useCallback(async (everyone = false) => {
     setLoading(true);
@@ -107,23 +117,6 @@ export default function App() {
   useEffect(() => {
     if (configured) load();
   }, [configured, load]);
-
-  const checkOrg = async () => {
-    if (!orgInput.trim()) return;
-    setOrgTestMsg("Проверка…");
-    try {
-      const r = await testOrgId(orgInput.trim(), orgHeader);
-      if (r.ok) {
-        setOrgTestMsg(`Подходит: ${r.display ?? "OK"}. Вставьте в .env: TRACKER_ORG_ID=${orgInput.trim()}`);
-      } else if ("hint" in r && typeof (r as { hint?: string }).hint === "string") {
-        setOrgTestMsg((r as { hint: string }).hint);
-      } else {
-        setOrgTestMsg("Не подошло. Попробуйте другой ID или X-Cloud-Org-ID.");
-      }
-    } catch {
-      setOrgTestMsg("Ошибка проверки. Убедитесь, что TRACKER_OAUTH_TOKEN задан и backend запущен.");
-    }
-  };
 
   const setPreset = (days: number) => {
     const end = new Date();
@@ -233,88 +226,7 @@ export default function App() {
         </div>
       </header>
 
-      {configured === false && cfg && (
-        <section className="banner banner-warn setup-guide">
-          <strong>Осталось настроить API</strong>
-          <p>
-            Файл: <code>{cfg.envPath}</code>. Создайте приложение{" "}
-            <a href="https://oauth.yandex.ru/client/new/id" target="_blank" rel="noreferrer">
-              для доступа к API
-            </a>{" "}
-            с правами <code>tracker:read</code> и для редактирования времени —{" "}
-            <code>tracker:write</code>.
-          </p>
-          <ul className="checklist">
-            <li className={cfg.hasClientId ? "done" : "todo"}>
-              TRACKER_OAUTH_CLIENT_ID {cfg.hasClientId ? "✓" : "— укажите Client ID"}
-            </li>
-            <li className={cfg.hasToken ? "done" : "todo"}>
-              TRACKER_OAUTH_TOKEN{" "}
-              {cfg.hasToken ? (
-                <>
-                  ✓ — scope <em>{cfg.oauthScope ?? "tracker:read"}</em>{" "}
-                  <a href={cfg.oauthStartUrl ?? "/oauth/start"} target="_blank" rel="noreferrer">
-                    перевыпустить
-                  </a>
-                </>
-              ) : cfg.hasClientId ? (
-                <>
-                  —{" "}
-                  <a href={cfg.oauthStartUrl ?? "/oauth/start"} target="_blank" rel="noreferrer">
-                    получить токен
-                  </a>
-                </>
-              ) : (
-                "— сначала Client ID"
-              )}
-            </li>
-            <li className={cfg.hasOrgId ? "done" : "todo"}>
-              TRACKER_ORG_ID{" "}
-              {cfg.hasOrgId ? (
-                "✓"
-              ) : (
-                <button type="button" className="link-btn" onClick={() => setShowOrgHelp((v) => !v)}>
-                  как узнать ID
-                </button>
-              )}
-            </li>
-          </ul>
-          {showOrgHelp && !cfg.hasOrgId && (
-            <div className="org-help-box">
-              <p>
-                F12 → Консоль на{" "}
-                <a href="https://tracker.yandex.ru/agile/board/288" target="_blank" rel="noreferrer">
-                  доске 288
-                </a>
-                , скрипт для Org ID — в{" "}
-                <a href="http://127.0.0.1:8000/oauth/org-help" target="_blank" rel="noreferrer">
-                  инструкции
-                </a>
-                .
-              </p>
-            </div>
-          )}
-          {!cfg.hasOrgId && cfg.hasToken && (
-            <div className="org-test">
-              <label>
-                Проверить ID
-                <input value={orgInput} onChange={(e) => setOrgInput(e.target.value)} />
-              </label>
-              <label>
-                Заголовок
-                <select value={orgHeader} onChange={(e) => setOrgHeader(e.target.value)}>
-                  <option value="X-Org-ID">X-Org-ID</option>
-                  <option value="X-Cloud-Org-ID">X-Cloud-Org-ID</option>
-                </select>
-              </label>
-              <button type="button" className="btn btn-secondary" onClick={checkOrg}>
-                Проверить
-              </button>
-              {orgTestMsg && <p className="org-test-msg">{orgTestMsg}</p>}
-            </div>
-          )}
-        </section>
-      )}
+      {configured === false && cfg && <SetupWizard cfg={cfg} onConfigured={handleConfigured} />}
 
       {configured === null && <LoadingPanel message="Проверка настроек…" />}
 
@@ -333,7 +245,7 @@ export default function App() {
         <p className="banner banner-warn banner-compact">
           Только просмотр — нужен <code>tracker:write</code>.{" "}
           <a href={cfg?.oauthStartUrl ?? "/oauth/start"} target="_blank" rel="noreferrer">
-            Новый токен
+            Получить новый токен
           </a>
         </p>
       )}

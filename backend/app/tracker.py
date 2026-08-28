@@ -107,6 +107,9 @@ class TrackerClient:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
+    def update_settings(self, settings: Settings) -> None:
+        self._settings = settings
+
     def _headers(self) -> dict[str, str]:
         token = self._settings.tracker_token
         auth = token if token.lower().startswith(("oauth ", "bearer ")) else f"OAuth {token}"
