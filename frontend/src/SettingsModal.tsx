@@ -29,6 +29,8 @@ export function SettingsModal({ cfg, onClose, onSaved }: SettingsModalProps) {
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const [writeOk, setWriteOk] = useState<boolean | null>(null);
+  const [resolvedMap, setResolvedMap] = useState<Record<string, string>>({});
+  const [unresolved, setUnresolved] = useState<string[]>([]);
 
   useEffect(() => {
     setOrgId(cfg.orgId ?? "");
@@ -109,10 +111,35 @@ export function SettingsModal({ cfg, onClose, onSaved }: SettingsModalProps) {
     setBusy(true);
     setError(null);
     setHint(null);
+    setResolvedMap({});
+    setUnresolved([]);
     try {
       const next = await saveConfig({ extraWorklogLogins: parseLogins(extraLogins) });
       onSaved(next);
-      setHint("Список сотрудников сохранён — обновите табель");
+      setExtraLogins((next.extraWorklogLogins ?? []).join("\n"));
+      const resolved = next.extraWorklogResolved ?? {};
+      const failed = next.extraWorklogUnresolved ?? [];
+      setResolvedMap(resolved);
+      setUnresolved(failed);
+      if (failed.length > 0) {
+        setError(`Не найдены в Tracker: ${failed.join(", ")}`);
+        setHint(
+          Object.keys(resolved).length > 0
+            ? "Остальные сотрудники сохранены — обновите табель"
+            : null,
+        );
+      } else if (Object.keys(resolved).length > 0) {
+        const pairs = Object.entries(resolved)
+          .filter(([from, to]) => from !== to)
+          .map(([from, to]) => `${from} → ${to}`);
+        setHint(
+          pairs.length > 0
+            ? `Сохранено. Логины: ${pairs.join(", ")}. Обновите табель.`
+            : "Список сотрудников сохранён — обновите табель",
+        );
+      } else {
+        setHint("Список сотрудников сохранён — обновите табель");
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось сохранить");
     } finally {
@@ -228,16 +255,16 @@ export function SettingsModal({ cfg, onClose, onSaved }: SettingsModalProps) {
         {tab === "people" && (
           <div className="setup-panel">
             <p>
-              Логины Tracker (как в URL профиля: <code>ivan.bazhanov</code>). Их списания подгружаются при
+              Логин Tracker (<code>ivan.bazhanov</code>) или корпоративная почта. Их списания подгружаются при
               загрузке табеля, даже если человек не исполнитель на доске. По одному на строку или через запятую.
             </p>
             <label className="field setup-field">
-              <span>Список логинов</span>
+              <span>Список сотрудников</span>
               <textarea
                 className="setup-textarea settings-logins"
                 value={extraLogins}
                 onChange={(e) => setExtraLogins(e.target.value)}
-                placeholder={"ivan.bazhanov\npetrov.a"}
+                placeholder={"ivan.bazhanov\nivan@company.ru"}
                 rows={6}
               />
             </label>
@@ -249,6 +276,18 @@ export function SettingsModal({ cfg, onClose, onSaved }: SettingsModalProps) {
               </ul>
             ) : (
               <p className="settings-empty">Список пуст — загружаются только исполнители с доски и вы.</p>
+            )}
+            {Object.keys(resolvedMap).length > 0 && (
+              <ul className="settings-login-chips settings-resolved">
+                {Object.entries(resolvedMap).map(([from, to]) => (
+                  <li key={from}>
+                    {from === to ? to : `${from} → ${to}`}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {unresolved.length > 0 && (
+              <p className="setup-error">Не найдены: {unresolved.join(", ")}</p>
             )}
             <div className="setup-actions">
               <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void savePeople()}>

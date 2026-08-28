@@ -72,6 +72,8 @@ export interface ConfigStatus {
   setupStep?: "oauth_app" | "token" | "org" | "done";
   orgId?: string | null;
   extraWorklogLogins?: string[];
+  extraWorklogResolved?: Record<string, string>;
+  extraWorklogUnresolved?: string[];
 }
 
 export interface ConfigUpdate {

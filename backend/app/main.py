@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -14,7 +15,13 @@ from pydantic import BaseModel
 
 from .errors import format_api_error
 from .org_discovery import extract_org_ids_from_text, probe_without_org, test_org_access, try_discover_org_ids
-from .tracker import TrackerClient, TrackerError, invalidate_board_worklog_cache, today_report
+from .tracker import (
+    TrackerClient,
+    TrackerError,
+    invalidate_board_worklog_cache,
+    today_report,
+    _is_everyone_assignee,
+)
 
 app = FastAPI(title="Yandex Tracker Time Analytics", version="1.0.0")
 app.include_router(oauth_router)
@@ -59,7 +66,19 @@ async def config_status() -> dict:
         "setupStep": _setup_step(cfg),
         "orgId": cfg.org_id if cfg.org_id else None,
         "extraWorklogLogins": list(cfg.extra_worklog_logins),
+        "extraWorklogUnresolved": [],
     }
+
+
+async def _resolve_assignee_ref(assignee: str | None) -> str | None:
+    if not assignee or not assignee.strip():
+        return assignee
+    raw = assignee.strip()
+    if _is_everyone_assignee(raw) or "@" not in raw:
+        return raw
+    async with httpx.AsyncClient(timeout=60.0) as http:
+        resolved = await client.resolve_user_login(http, raw)
+    return resolved or raw
 
 
 def _setup_step(cfg) -> str:
@@ -98,6 +117,8 @@ def _normalize_token(raw: str) -> str:
 @app.post("/api/config")
 async def update_config(body: ConfigUpdateBody) -> dict:
     updates: dict[str, str] = {}
+    resolved_map: dict[str, str] = {}
+    unresolved: list[str] = []
     if body.oauthClientId is not None:
         updates["TRACKER_OAUTH_CLIENT_ID"] = body.oauthClientId.strip()
     if body.oauthClientSecret is not None:
@@ -113,8 +134,16 @@ async def update_config(body: ConfigUpdateBody) -> dict:
     if body.boardId is not None and body.boardId > 0:
         updates["TRACKER_BOARD_ID"] = str(body.boardId)
     if body.extraWorklogLogins is not None:
-        logins = [login.strip() for login in body.extraWorklogLogins if login.strip()]
-        updates["TRACKER_EXTRA_WORKLOG_LOGINS"] = ",".join(logins)
+        raw_items = [login.strip() for login in body.extraWorklogLogins if login.strip()]
+        current = env_snapshot()
+        if raw_items and current.tracker_token:
+            async with httpx.AsyncClient(timeout=60.0) as http:
+                resolved_logins, resolved_map, unresolved = await client.resolve_user_logins(
+                    http, raw_items
+                )
+            updates["TRACKER_EXTRA_WORKLOG_LOGINS"] = ",".join(resolved_logins)
+        else:
+            updates["TRACKER_EXTRA_WORKLOG_LOGINS"] = ",".join(raw_items)
 
     if not updates:
         raise HTTPException(status_code=400, detail="Нечего сохранять")
@@ -131,7 +160,11 @@ async def update_config(body: ConfigUpdateBody) -> dict:
             hint = probe.get("hint") or "Проверьте ID организации"
             raise HTTPException(status_code=400, detail=hint)
 
-    return await config_status()
+    result = await config_status()
+    if body.extraWorklogLogins is not None:
+        result["extraWorklogResolved"] = resolved_map
+        result["extraWorklogUnresolved"] = unresolved
+    return result
 
 
 @app.get("/api/check-write-access")
@@ -255,12 +288,13 @@ async def assignee_worklogs(
         raise HTTPException(status_code=400, detail="Дата «с» не может быть позже даты «по»")
 
     target_board = board_id or settings.board_id
+    assignee_key = await _resolve_assignee_ref(assignee.strip() if assignee else None)
     try:
         return await client.fetch_assignee_worklog_report(
             target_board,
             start,
             end,
-            assignee_key=assignee.strip() if assignee else None,
+            assignee_key=assignee_key,
         )
     except TrackerError as exc:
         raise HTTPException(
@@ -284,10 +318,11 @@ async def sprint_load(
         )
 
     target_board = board_id or settings.board_id
+    assignee_key = await _resolve_assignee_ref(assignee.strip() if assignee else None)
     try:
         return await client.fetch_sprint_load_report(
             target_board,
-            assignee=assignee.strip() if assignee else None,
+            assignee=assignee_key,
         )
     except TrackerError as exc:
         raise HTTPException(
@@ -319,13 +354,14 @@ async def time_report(
         raise HTTPException(status_code=400, detail="Дата «с» не может быть позже даты «по»")
 
     target_board = board_id or settings.board_id
+    assignee_key = await _resolve_assignee_ref(assignee.strip() if assignee else None)
 
     try:
         return await client.fetch_time_report(
             target_board,
             start,
             end,
-            assignee=assignee.strip() if assignee else None,
+            assignee=assignee_key,
         )
     except TrackerError as exc:
         raise HTTPException(

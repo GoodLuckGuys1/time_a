@@ -8,6 +8,7 @@ import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, NamedTuple
+from urllib.parse import quote
 import httpx
 
 from .config import Settings
@@ -94,7 +95,7 @@ _ENRICH_PARALLEL_BATCHES = 4
 _board_worklog_cache: dict[tuple, tuple[float, BoardWorklogs]] = {}
 _board_issues_cache: dict[tuple[int, str, bool], tuple[float, list[dict[str, Any]]]] = {}
 _sprint_load_cache: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
-_org_user_logins_cache: tuple[float, list[str]] | None = None
+_org_users_cache: tuple[float, list[dict[str, Any]]] | None = None
 _tracker_cache_lock = asyncio.Lock()
 
 
@@ -653,17 +654,14 @@ class TrackerClient:
             cursor += timedelta(days=1)
         return collected
 
-    async def get_org_user_logins(self, client: httpx.AsyncClient) -> list[str]:
-        global _org_user_logins_cache
+    async def get_org_users(self, client: httpx.AsyncClient) -> list[dict[str, Any]]:
+        global _org_users_cache
         now = time.monotonic()
         async with _tracker_cache_lock:
-            if (
-                _org_user_logins_cache
-                and now - _org_user_logins_cache[0] < _ORG_USERS_CACHE_TTL_SEC
-            ):
-                return _org_user_logins_cache[1]
+            if _org_users_cache and now - _org_users_cache[0] < _ORG_USERS_CACHE_TTL_SEC:
+                return _org_users_cache[1]
 
-        logins: list[str] = []
+        users: list[dict[str, Any]] = []
         page = 1
         try:
             while page <= 50:
@@ -675,19 +673,90 @@ class TrackerClient:
                 )
                 if not isinstance(batch, list) or not batch:
                     break
-                for user in batch:
-                    login = user.get("login")
-                    if login:
-                        logins.append(str(login))
+                users.extend(batch)
                 if len(batch) < 100:
                     break
                 page += 1
         except TrackerError:
-            logins = []
+            users = []
 
         async with _tracker_cache_lock:
-            _org_user_logins_cache = (now, logins)
+            _org_users_cache = (now, users)
+        return users
+
+    async def get_org_user_logins(self, client: httpx.AsyncClient) -> list[str]:
+        logins: list[str] = []
+        for user in await self.get_org_users(client):
+            login = user.get("login")
+            if login:
+                logins.append(str(login))
         return logins
+
+    async def resolve_user_login(self, client: httpx.AsyncClient, identifier: str) -> str | None:
+        """Логин Tracker по email, логину или uid/id."""
+        raw = (identifier or "").strip()
+        if not raw:
+            return None
+
+        if "@" in raw:
+            try:
+                users = await self._request(client, "GET", "/v3/users", params={"email": raw})
+                if isinstance(users, list) and users:
+                    login = users[0].get("login")
+                    if login:
+                        return str(login)
+            except TrackerError:
+                pass
+            email_key = raw.casefold()
+            for user in await self.get_org_users(client):
+                if str(user.get("email") or "").casefold() == email_key:
+                    login = user.get("login")
+                    if login:
+                        return str(login)
+            return None
+
+        key = raw.casefold()
+        for user in await self.get_org_users(client):
+            login = user.get("login")
+            if login and str(login).casefold() == key:
+                return str(login)
+            for field in ("id", "uid", "trackerUid", "passportUid", "cloudUid"):
+                val = user.get(field)
+                if val is not None and str(val) == raw:
+                    return str(login or raw)
+
+        try:
+            user = await self._request(client, "GET", f"/v3/users/{quote(raw, safe='')}")
+            if isinstance(user, dict) and user.get("login"):
+                return str(user["login"])
+        except TrackerError:
+            pass
+
+        return raw
+
+    async def resolve_user_logins(
+        self, client: httpx.AsyncClient, identifiers: list[str]
+    ) -> tuple[list[str], dict[str, str], list[str]]:
+        """(уникальные логины, исходное→логин, неразрешённые)."""
+        resolved: list[str] = []
+        mapping: dict[str, str] = {}
+        failed: list[str] = []
+        seen: set[str] = set()
+
+        for item in identifiers:
+            raw = (item or "").strip()
+            if not raw:
+                continue
+            login = await self.resolve_user_login(client, raw)
+            if not login:
+                failed.append(raw)
+                continue
+            mapping[raw] = login
+            if login not in seen:
+                seen.add(login)
+                resolved.append(login)
+
+        return resolved, mapping, failed
 
     @staticmethod
     def _collect_assignee_logins(issues: list[dict[str, Any]]) -> set[str]:
@@ -707,7 +776,10 @@ class TrackerClient:
         user_login: str | None,
     ) -> set[str]:
         logins = self._collect_assignee_logins(issues)
-        logins.update(self._settings.extra_worklog_logins)
+        for raw in self._settings.extra_worklog_logins:
+            resolved = await self.resolve_user_login(client, raw)
+            if resolved:
+                logins.add(resolved)
         if user_login:
             logins.add(str(user_login))
 
